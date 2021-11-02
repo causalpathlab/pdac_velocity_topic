@@ -1,0 +1,209 @@
+---
+title: "Quality control for PDAC single-cell transcriptomic data"
+author: "Mohammadali (Sam) Khalilitousi, Yongjin P. Park"
+date: "`r Sys.Date()`"
+font_size: 12pt
+---
+
+```{r include = FALSE}
+source("Util-rmd.R")
+data.table::setDTthreads(15)
+library(patchwork)
+library(mmutilR)
+
+fig.dir <- "Figures/QC"
+.mkdir(fig.dir)
+```
+
+# Quality Control
+
+## Data Sources
+
+* FASTQ files for pancreatic ductal adenocarcinoma (PDAC) were obtained from the GSA: `https://ngdc.cncb.ac.cn/gsa/browse/CRA001160`
+
+* FASTQ files were transformed into spliced and unspliced count matrices using kb-python: `https://www.kallistobus.tools/`
+
+* The ENSEMBL Gene IDs were converted to Gene Symbols using biotools: `https://www.biotools.fr/human/ensembl_symbol_converter`
+
+* Pancreatic Cancer associated genes: `https://maayanlab.cloud/Harmonizome/gene_set/pancreatic+cancer/DISEASES+Text-mining+Gene-Disease+Assocation+Evidence+Scores`
+
+## Sample Annotation
+
+Samples that contained different number of cell counts in their spliced and unsplcied gene count matrices were not selected for further analysis.
+
+* Normal Samples: CRR034530, CRR034529, CRR034528, CRR034527,
+  CRR034526, CRR034525, CRR034524, CRR034523, CRR034522, CRR034521,
+  CRR034520
+
+* Cancer Samples:
+
+	* PDACI: CRR241799 (T3), CRR034500 (T5), CRR034512 (T17),
+      CRR034513 (T18), CRR034519 (T24), CRR034517 (T22), CRR034516
+      (T21), CRR241802 (T19), CRR034505 (T10)
+
+	* PDACII: CRR241798 (T2), CRR034499 (T4), CRR034501 (T6),
+      CRR034504 (T9), CRR241803 (T23), CRR241804 (T20), CRR241800
+      (T7), CRR034511 (T16), CRR034506 (T11), CRR034510 (T15),
+      CRR034509 (T14), CRR241801 (T13)
+
+	* PDACIII: CRR241805 (T1), CRR034503 (T8), CRR034507 (T12)
+
+* Samples we though had unknown stage: CRR034519 (T24), CRR241803
+  (T23), CRR034517 (T22), CRR034516 (T21), CRR241804 (T20), CRR241800
+  (T7), CRR241802 (T19), CRR034505 (T10), CRR034511 (T16), CRR034506
+  (T11), CRR034510 (T15), CRR034509 (T14), CRR241801 (T13)
+
+* Samples excluded: CRR034501 (T6), CRR034507 (T12), CRR034509 (T14),
+  CRR034510 (T15), CRR034517 (T22)
+
+## Data preparation
+
+```{r echo=FALSE}
+velocytoFolder <- "Data/Merged/"
+
+.read.vec <- function(.file, .folder = velocytoFolder){
+    fread(str_c(.folder, .file), header = FALSE) %>%
+        unlist(use.names = FALSE)
+}
+
+barcodes <- .read.vec("samples.tsv")
+features <- .read.vec("allCombinedgenes.tsv")
+GWASgenes <- .read.vec("GWASgenes.txt") %>% intersect(features)
+
+## We may not need to load entire MTX
+## X <- Matrix::readMM(paste(velocytoFolder,"allCombined.mtx", sep=""))
+## colnames(X) <- barcodes[,1]
+## rownames(X) <- features[,1]
+```
+
+### Compute row-wise and column-wise scores of the combined single-cell data matrix
+
+
+```{r}
+.mkdir("Results/QC")
+if(file.exists("Results/QC/MT.mtx.gz")) {
+    .mt.only <- list(mtx = "Results/QC/MT.mtx.gz",
+                     row = "Results/QC/MT.rows.gz",
+                     col = "Results/QC/MT.cols.gz")
+} else {
+    .mt.genes <- features[str_starts(features, "MT-")]
+    .mt.only <-
+        rcpp_mmutil_copy_selected_rows("Data/Merged/allCombined.mtx.gz",
+                                       str_c(velocytoFolder,"allCombinedgenes.tsv"),
+                                       str_c(velocytoFolder,"samples.tsv"),
+                                       .mt.genes,
+                                       "Results/QC/MT")
+}
+```
+
+```{r}
+.mkdir("Table/QC/")
+.file <- "Table/QC/cell_scores.csv.gz"
+.file.2 <- "Table/QC/feature_scores.csv.gz"
+
+
+
+if(!all(file.exists(c(.file, .file.2)))) {
+
+    all.scores <-
+        rcpp_mmutil_compute_scores("Data/Merged/allCombined.mtx.gz",
+                                   str_c(velocytoFolder,"allCombinedgenes.tsv"),
+                                   str_c(velocytoFolder,"samples.tsv"))
+
+    mt.scores <-
+        rcpp_mmutil_compute_scores(.mt.only$mtx,
+                                   .mt.only$row,
+                                   .mt.only$col)
+
+    score.dt <-
+        setDT(all.scores$col) %>%
+        left_join(setDT(mt.scores$col),
+                  by = "name",
+                  suffix = c("", ".MT")) %>%
+        as.data.table
+    score.dt[is.na(`sum.MT`), `sum.MT` := 0]
+    score.dt[, mito := `sum.MT` / `sum` * 100]
+    fwrite(score.dt, .file)
+
+    row.score.dt <- setDT(all.scores$row)
+    fwrite(row.score.dt, .file.2)
+
+} else {
+    score.dt <- fread(.file)
+    row.score.dt <- fread(.file.2)
+}
+```
+
+```{r}
+MITO.CUTOFF <- 50
+NNZ.CUTOFF <- 300
+```
+
+#### Select high-quality cells that contain at least $>$ `r NNZ.CUTOFF` non-zero genes expressed with the mitochondrial gene activity $<$ `r MITO.CUTOFF` %
+
+```{r}
+.hist.nnz <- score.dt[, .(.N), by = .(0.1 * ceiling(10 * log10(nnz)))]
+names(.hist.nnz) <- c("nnz.log10", "count")
+.hist.mito <- score.dt[, .(.N), by = .(ceiling(mito/2) * 2)]
+names(.hist.mito) <- c("mito", "count")
+
+.dt <- score.dt %>%
+    mutate(nnz.log10.grid = 0.1 * ceiling(10 * log10(nnz)),
+           mito.grid = ceiling(mito))
+
+.hist.joint <- .dt[, .(.N), by = .(nnz.log10.grid, mito.grid)]
+```
+
+```{r echo = FALSE, results = "asis", fig.width = 5, fig.height=4}
+.lab <- function(x) num.sci(10^(x))
+
+p1 <-
+    .gg.plot(.hist.nnz, aes(x = `nnz.log10`, y = `count`)) +
+    geom_bar(stat="identity") +
+    geom_vline(xintercept = log10(NNZ.CUTOFF), colour = "red", lty = 2, size = .5) +
+    scale_x_continuous("# non-zero elements per cell", labels = .lab) +
+    scale_y_continuous(labels = num.int)
+
+p2 <-
+    .gg.plot(.hist.mito, aes(y = `mito`, x = -`count`)) +
+    geom_segment(aes(yend = `mito`, xend = 0), size = 1, colour = "gray30") +
+    geom_hline(yintercept = MITO.CUTOFF, colour = "red", lty = 2, size = .5) +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1)) +
+    ylab("Mitochondrial activity (%)") +
+    scale_x_continuous("count", labels = function(x) num.sci(-x))
+
+p3 <-
+    .gg.plot(.hist.joint, aes(x = nnz.log10.grid, y = mito.grid, fill = log10(`N`))) +
+    theme(panel.background = element_blank()) +
+    scale_x_continuous("# non-zero elements per cell", labels = .lab) +
+    scale_y_continuous("Mitochondrial activity (%)") +
+    geom_tile() +
+    geom_vline(xintercept = log10(NNZ.CUTOFF), colour = "red", lty = 2, size = .5) +
+    geom_hline(yintercept = MITO.CUTOFF, colour = "red", lty = 2, size = .5) +
+    scale_fill_distiller("count", direction = 1, labels = function(x) num.int(10^x)) +
+    theme(legend.position = c(1,1), legend.justification = c(1,1))
+
+p0 <- ggplot() + theme_void()
+
+ptop <- (p0|p1) + plot_layout(widths=c(1,3))
+pbot <- (p2|p3) + plot_layout(widths=c(1,3))
+plt <- (ptop/pbot) +plot_layout(heights=c(1,3))
+print(plt)
+
+.file <- str_c(fig.dir, "/Fig_qc_nnz_mito_cutoff.pdf")
+.gg.save(.file, plot = plt, width = 5, height = 4)
+```
+
+```{r include = FALSE}
+ntot.cells <- nrow(score.dt)
+nqc.cells <- nrow(score.dt[mito < MITO.CUTOFF & nnz > NNZ.CUTOFF])
+```
+
+#### Of `r num.int(ntot.cells)` cells, we retained `r num.int(nqc.cells)` (`r num.round(nqc.cells/ntot.cells*100)` %), discarding `r num.int(ntot.cells - nqc.cells)` cells (`r num.round(100 * (ntot.cells - nqc.cells) / ntot.cells)` %) by applying the Q/C steps
+
+### We focused on the known PDAC-associated genes implicated by the previous genome-wide association studies
+
+```{r}
+GWASgenes <- .read.vec("GWASgenes.txt")
+```
+
