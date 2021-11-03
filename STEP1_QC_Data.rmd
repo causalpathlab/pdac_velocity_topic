@@ -13,6 +13,12 @@ library(mmutilR)
 
 fig.dir <- "Figures/QC"
 .mkdir(fig.dir)
+
+velocytoFolder <- "Data/Merged/"
+.read.vec <- function(.file, .folder = velocytoFolder){
+    fread(str_c(.folder, .file), header = FALSE) %>%
+        unlist(use.names = FALSE)
+}
 ```
 
 # Quality Control
@@ -59,13 +65,6 @@ Samples that contained different number of cell counts in their spliced and unsp
 ## Data preparation
 
 ```{r echo=FALSE}
-velocytoFolder <- "Data/Merged/"
-
-.read.vec <- function(.file, .folder = velocytoFolder){
-    fread(str_c(.folder, .file), header = FALSE) %>%
-        unlist(use.names = FALSE)
-}
-
 barcodes <- .read.vec("samples.tsv")
 features <- .read.vec("allCombinedgenes.tsv")
 GWASgenes <- .read.vec("GWASgenes.txt") %>% intersect(features)
@@ -101,14 +100,16 @@ if(file.exists("Results/QC/MT.mtx.gz")) {
 .file <- "Table/QC/cell_scores.csv.gz"
 .file.2 <- "Table/QC/feature_scores.csv.gz"
 
-
+full.data <- list(mtx = "Data/Merged/allCombined.mtx.gz",
+                  row = str_c(velocytoFolder,"allCombinedgenes.tsv"),
+                  col = str_c(velocytoFolder,"samples.tsv"))
 
 if(!all(file.exists(c(.file, .file.2)))) {
 
     all.scores <-
-        rcpp_mmutil_compute_scores("Data/Merged/allCombined.mtx.gz",
-                                   str_c(velocytoFolder,"allCombinedgenes.tsv"),
-                                   str_c(velocytoFolder,"samples.tsv"))
+        rcpp_mmutil_compute_scores(full.data$mtx,
+                                   full.data$row,
+                                   full.data$col)
 
     mt.scores <-
         rcpp_mmutil_compute_scores(.mt.only$mtx,
@@ -203,7 +204,79 @@ nqc.cells <- nrow(score.dt[mito < MITO.CUTOFF & nnz > NNZ.CUTOFF])
 
 ### We focused on the known PDAC-associated genes implicated by the previous genome-wide association studies
 
-```{r}
-GWASgenes <- .read.vec("GWASgenes.txt")
+```{r echo = FALSE, results = "asis", fig.width = 6, fig.height=2}
+.dt <-
+    copy(row.score.dt) %>%
+    mutate(gwas = if_else(`name` %in% GWASgenes, "GWAS", "non-GWAS")) %>%
+    as.data.table
+
+.plot.distrib <- function(.aes){
+    .gg.plot(.dt, .aes) +
+        geom_violin(size = 0) +
+        theme(legend.position = "none") +
+        theme(axis.title.x = element_blank()) +
+        ggpubr::stat_compare_means(size = 2) +
+        scale_fill_brewer(palette = "Paired") +
+        geom_boxplot(outlier.size = 0, outlier.stroke = 0,
+                     width = .05, size = .2, fill = "white")
+    
+}
+
+.aes <- aes(x = gwas, y = log10(pmax(nnz, 1)), fill = gwas)
+p1 <-
+    .plot.distrib(.aes) +
+    scale_y_continuous("# non-zero elements", labels = function(x) num.int(10^(x)))
+
+.aes <- aes(x = gwas, y = log10(pmax(1e-4, `sd`)), fill = gwas)
+p2 <-
+    .plot.distrib(.aes) +
+    scale_y_continuous("max {StdDev, 1e-4}", labels = function(x) 10^(x))
+
+.aes <- aes(x = gwas, y = log10(pmax(1e-4, `mean`)), fill = gwas)
+p3 <-
+    .plot.distrib(.aes) +
+    scale_y_continuous("max {Mean, 1e-4}", labels = function(x) 10^(x))
+
+plt <- p1 | p2 | p3
+print(plt)
+.file <- str_c(fig.dir, "/Fig_gwas_genes_vs_nongwas.pdf")
+.gg.save(.file, plot = plt, width = 6, height = 2)
 ```
+
+```{r}
+unique.gwas.genes <- str_remove(GWASgenes, "_[us]$") %>% unique
+```
+
+We selected `r num.int(length(unique.gwas.genes))` PDAC GWAS genes from literature search, considering the spliced and unspliced counts separately, and included `r num.int(length(GWASgenes))` features. To our surprise, these genes tend to capture a significantly higher level of variation across cells than the non-GWAS genes.
+
+#### Create a fileset of Q/C'ed gene expression data
+
+```{r}
+.mkdir("Results/QC")
+if(file.exists("Results/QC/PDAC_GWAS.mtx.gz")) {
+    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS.mtx.gz",
+                      row = "Results/QC/PDAC_GWAS.rows.gz",
+                      col = "Results/QC/PDAC_GWAS.cols.gz")
+
+} else {
+    gwas.data <-
+        rcpp_mmutil_copy_selected_rows(full.data$mtx,
+                                       full.data$row,
+                                       full.data$col,
+                                       GWASgenes,
+                                       "Results/QC/PDAC_GWAS")
+}
+```
+
+```{r}
+.info <- rcpp_mmutil_info("Results/QC/PDAC_GWAS.mtx.gz")
+```
+
+MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
+
+[MTX](Results/QC/PDAC_GWAS.mtx.gz)
+
+[ROW](Results/QC/PDAC_GWAS.rows.gz)
+
+[COL](Results/QC/PDAC_GWAS.cols.gz)
 
