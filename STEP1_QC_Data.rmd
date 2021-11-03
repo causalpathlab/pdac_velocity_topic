@@ -249,6 +249,44 @@ unique.gwas.genes <- str_remove(GWASgenes, "_[us]$") %>% unique
 
 We selected `r num.int(length(unique.gwas.genes))` PDAC GWAS genes from literature search, considering the spliced and unspliced counts separately, and included `r num.int(length(GWASgenes))` features. To our surprise, these genes tend to capture a significantly higher level of variation across cells than the non-GWAS genes.
 
+
+```{r fig.width=5, fig.height=5, results = "asis"}
+.dt <-
+    row.score.dt[, c("gene","status") := tstrsplit(`name`, split="_")]
+
+.dt.sum <- .dt %>% 
+    mutate(gwas = if_else(`name` %in% GWASgenes, "GWAS", "non-GWAS")) %>%
+    dcast(gene + gwas ~ status,
+          value.var = "sum",
+          fun.aggregate = sum) %>%
+    filter(`s` + `u` > 0)
+
+p1 <-
+    .gg.plot(.dt.sum, aes(y = log(1 + `u`), x = log(1 + `s`))) +
+    ylab("log(1 + unspliced)") + xlab("log(1 + spliced)") +
+    facet_grid(.~ gwas) +
+    geom_point(stroke = 0, size = .5) +
+    geom_abline(slope = 1, colour = "red", size = .5, lty = 2)
+
+p2 <-
+    .gg.plot(.dt.sum, aes(y = log(1 + `u`), x = log(1 + `s`))) +
+    ylab("log(1 + unspliced)") + xlab("log(1 + spliced)") +
+    theme(panel.background = element_blank()) +
+    theme(legend.position = c(0,1)) +
+    theme(legend.justification = c(0,1)) +
+    facet_grid(.~ gwas) +
+    stat_bin_hex(aes(colour = ..count..), bins = 25) +
+    scale_colour_distiller(direction = 1, trans = "log10", guide="none") +
+    scale_fill_distiller(direction = 1, trans = "log10") +
+    geom_abline(slope = 1, colour = "red", size = .5, lty = 2)
+
+plt <- p1/p2
+print(plt)
+.file <- str_c(fig.dir, "/Fig_u_vs_s_gwas_genes_vs_nongwas.pdf")
+.gg.save(.file, plot = plt, width = 5, height = 5)
+```
+
+
 #### Create a fileset of Q/C'ed gene expression data
 
 ```{r}
