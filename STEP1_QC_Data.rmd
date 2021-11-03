@@ -13,12 +13,7 @@ library(mmutilR)
 
 fig.dir <- "Figures/QC"
 .mkdir(fig.dir)
-
 velocytoFolder <- "Data/Merged/"
-.read.vec <- function(.file, .folder = velocytoFolder){
-    fread(str_c(.folder, .file), header = FALSE) %>%
-        unlist(use.names = FALSE)
-}
 ```
 
 # Quality Control
@@ -65,6 +60,10 @@ Samples that contained different number of cell counts in their spliced and unsp
 ## Data preparation
 
 ```{r echo=FALSE}
+.read.vec <- function(.file, .folder = velocytoFolder){
+    fread(str_c(.folder, .file), header = FALSE) %>%
+        unlist(use.names = FALSE)
+}
 barcodes <- .read.vec("samples.tsv")
 features <- .read.vec("allCombinedgenes.tsv")
 GWASgenes <- .read.vec("GWASgenes.txt") %>% intersect(features)
@@ -287,7 +286,7 @@ print(plt)
 ```
 
 
-#### Create a fileset of Q/C'ed gene expression data
+#### Create a fileset of gene expression data only including the GWAS genes
 
 ```{r}
 .mkdir("Results/QC")
@@ -312,9 +311,120 @@ if(file.exists("Results/QC/PDAC_GWAS.mtx.gz")) {
 
 MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
 
-[MTX](Results/QC/PDAC_GWAS.mtx.gz)
+[MTX](Results/QC/PDAC_GWAS.mtx.gz), [ROW](Results/QC/PDAC_GWAS.rows.gz), [COL](Results/QC/PDAC_GWAS.cols.gz)
 
-[ROW](Results/QC/PDAC_GWAS.rows.gz)
 
-[COL](Results/QC/PDAC_GWAS.cols.gz)
+#### Create a fileset of gene expression data, including the GWAS genes and non-GWAS genes with high variability
+
+
+```{r}
+.hist.nnz <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`nnz`)))]
+names(.hist.nnz) <- c("nnz.log10", "count")
+.hist.mean <- row.score.dt[mean > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`mean`)))]
+names(.hist.mean) <- c("mean.log10", "count")
+.hist.sd <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`sd`)))]
+names(.hist.sd) <- c("sd.log10", "count")
+.hist.cv <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`cv`)))]
+names(.hist.cv) <- c("cv.log10", "count")
+
+.dt <- row.score.dt %>%
+    filter(nnz > 0) %>% 
+    mutate(mean.log10.grid = 0.1 * ceiling(10 * log10(mean)),
+           sd.log10.grid = 0.1 * ceiling(10 * log10(`sd`))) %>%
+    na.omit %>%
+    as.data.table
+           
+.hist.joint <- .dt[, .(.N), by = .(mean.log10.grid, sd.log10.grid)]
+```
+
+```{r}
+SD.CUTOFF <- .1
+MEAN.CUTOFF <- 1e-2
+```
+
+```{r echo = FALSE, results = "asis", fig.width = 5, fig.height=4}
+.lab <- function(x) num.sci(10^(x))
+
+p1 <-
+    .gg.plot(.hist.mean, aes(x = `mean.log10`, y = `count`)) +
+    geom_bar(stat="identity", size = .25) +
+    geom_vline(xintercept = log10(MEAN.CUTOFF), colour = "red", lty = 2, size = .5) +
+    scale_x_continuous("average across cells", labels = .lab) +
+    scale_y_continuous(labels = num.int)
+
+p2 <-
+    .gg.plot(.hist.sd, aes(y = `sd.log10`, x = -`count`)) +
+    geom_segment(aes(yend = `sd.log10`, xend = 0), size = 1, colour = "gray30") +
+    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1)) +
+    geom_hline(yintercept = log10(SD.CUTOFF), colour = "red", lty = 2, size = .5) +
+    scale_y_continuous("standard deviation across cells", labels = .lab) +
+    scale_x_continuous("count", labels = function(x) num.sci(-x))
+
+p3 <-
+    .gg.plot(.hist.joint, aes(x = mean.log10.grid, y = sd.log10.grid, fill = log10(`N`))) +
+    theme(panel.background = element_blank()) +
+    scale_x_continuous("average across cells", labels = .lab) +
+    scale_y_continuous("standard deviation across cells", labels = .lab) +
+    geom_tile() +
+    geom_vline(xintercept = log10(MEAN.CUTOFF), colour = "red", lty = 2, size = .5) +
+    geom_hline(yintercept = log10(SD.CUTOFF), colour = "red", lty = 2, size = .5) +
+    scale_fill_distiller("count", direction = 1, labels = function(x) num.int(10^x)) +
+    theme(legend.position = c(0,1), legend.justification = c(0,1))
+
+p0 <- ggplot() + theme_void()
+
+pleft <- (p0/p2) + plot_layout(heights=c(1,3)) 
+pright <- (p1/p3) + plot_layout(heights=c(1,3)) 
+plt <- (pleft | pright) + plot_layout(widths=c(1,3))
+
+print(plt)
+
+.file <- str_c(fig.dir, "/Fig_gene_qc_cutoff.pdf")
+.gg.save(.file, plot = plt, width = 5, height = 4)
+```
+
+
+```{r}
+.genes <-
+    row.score.dt %>%
+    filter(!(`name` %in% GWASgenes)) %>%
+    filter(`sd` > SD.CUTOFF) %>% 
+    filter(`mean` > MEAN.CUTOFF) %>%
+    mutate(gene = str_remove(`name`, "_[us]$")) %>%
+    as.data.table
+
+non.gwas.genes <- 
+    .genes[order(.genes$nnz), head(.SD,1), by = .(gene)] %>%
+    head(length(GWASgenes)/2) %>%
+    select(gene) %>%
+    unlist %>%
+    (function(x) c(x %&% "_s", x %&% "_u"))
+```
+
+Create another fileset combining GWAS and other background genes.
+
+```{r}
+.mkdir("Results/QC")
+if(file.exists("Results/QC/PDAC_GWAS_BG.mtx.gz")) {
+    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS_BG.mtx.gz",
+                      row = "Results/QC/PDAC_GWAS_BG.rows.gz",
+                      col = "Results/QC/PDAC_GWAS_BG.cols.gz")
+
+} else {
+    gwas.data <-
+        rcpp_mmutil_copy_selected_rows(full.data$mtx,
+                                       full.data$row,
+                                       full.data$col,
+                                       c(GWASgenes, non.gwas.genes),
+                                       "Results/QC/PDAC_GWAS_BG")
+}
+```
+
+```{r}
+.info <- rcpp_mmutil_info("Results/QC/PDAC_GWAS_BG.mtx.gz")
+```
+
+MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
+
+[MTX](Results/QC/PDAC_GWAS_BG.mtx.gz), [ROW](Results/QC/PDAC_GWAS_BG.rows.gz), [COL](Results/QC/PDAC_GWAS_BG.cols.gz)
 
