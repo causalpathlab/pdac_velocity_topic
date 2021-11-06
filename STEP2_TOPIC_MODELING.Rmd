@@ -1,0 +1,274 @@
+---
+title: "Topic modelling for PDAC single-cell transcriptomic data"
+author: "Mohammadali (Sam) Khalilitousi, Yongjin P. Park"
+date: "`r Sys.Date()`"
+font_size: 12pt
+---
+
+```{r include = FALSE}
+#source("Util-rmd.R")
+#data.table::setDTthreads(15)
+#library(patchwork)
+#library(mmutilR)
+
+fig.dir <- "Figures/QC"
+#.mkdir(fig.dir)
+velocytoFolder <- "Data/Merged/"
+```
+
+# Topic Modeling
+
+## Data Sources
+
+* QC PDAC_GWAS and QC PDAC_GWAS_BG count matrices obtained from the previous step (STEP1_QC_DATA.rmd): `https://causalpathlab.github.io/pdac_velocity_topic/STEP1_QC_Data.html`
+* Summary GWAS of invasive pancreatic ductal adenocarcinoma from the JaPAN consortium: `http://www.aichi-med-u.ac.jp/JaPAN/current_initiatives-e.html`
+
+## Data Preparation
+
+## Put the new data preparation here (don't load everything)
+
+
+## Running Topic Modeling Code
+```{r}
+llibrary(Matrix)
+library(fastTopics)
+
+X <- Matrix::readMM("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.mtx.gz")
+barcodes <- read.table("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.cols.gz")
+features <- read.table("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.rows.gz")
+colnames(X) <- barcodes[,1]
+rownames(X) <- features[,1]
+
+ngenes = as.numeric(dim(X)[1])
+
+#separating spliced and unspliced counts
+s = X[1:(ngenes/2),]
+u = X[(ngenes/2+1):ngenes,]
+
+#Finding ratios between spliced and unspliced counts and vice versa
+ratio1 = log(u+1)-log(s+1)
+rownames(ratio1) = paste(gsub('.{2}$', '', rownames(s)),"u/s",sep = "_")
+ratio1[ratio1<0] = 0 #get rid of negative values
+ratio2 = log(s+1)-log(u+1)
+rownames(ratio2) = paste(gsub('.{2}$', '', rownames(s)),"s/u",sep = "_")
+ratio2[ratio2<0] = 0 #get rid of negative values
+X = rbind(ratio1,ratio2)
+
+#removing rows with sum = 0
+X = X[rowSums(X)>0,]
+#removing colums with sum = 0
+X = X[,colSums(X)>0]
+
+#Putting th ratios matrix in the cells x genes format preferred by fastTopics
+X=t(X)
+X = as(X, "dgCMatrix")
+
+fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
+save(fit10, ascii=FALSE, file="fit10_GWAS")
+
+fit10DE = fastTopics::diff_count_analysis(fit10,X)
+save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
+```
+
+
+
+## Analyzing Topic Modeling Results
+```{r}
+set.seed(1)
+
+#These topics were found using the s/u & u/s ratios.
+load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
+#load("/Users/samtoussi/Desktop/Pancreas/LDAimplementation/upload/fit10")
+
+topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
+structure_plot(fit10,colors = topic_colors10) #view structure plot
+
+#Labeling cells by their cancer stage
+cellNames =rownames(fit10[["L"]])
+caseControl = as.data.frame(cellNames)
+caseControl$labels = "Control"
+rownames(caseControl)= caseControl$cellNames
+PDACI = 'CRR241799|CRR034500|CRR034512|CRR034513|CRR034519|CRR034517|CRR034516|CRR241802|CRR034505'
+PDACII = 'CRR241798|CRR034499|CRR034501|CRR034504|CRR241803|CRR241804|CRR241800|CRR034511|CRR034506|CRR034510|CRR034509|CRR241801'
+PDACIII = 'CRR241805|CRR034503|CRR034507'
+caseControl[grep(PDACI,rownames(caseControl),value=TRUE),"labels"] = "PDACI"
+caseControl[grep(PDACII,rownames(caseControl),value=TRUE),"labels"] = "PDACII"
+caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"] = "PDACIII"
+
+#view structure plot, grouped by case/control label
+structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
+
+
+#Cluster cells based on topics
+set.seed(1)
+pca10 <- prcomp(fit10$L)$x
+clusters10GWAS <- kmeans(pca10,centers = 15,iter.max = 10000,)$cluster
+structure_plot(fit10,topics = 1:10,colors = topic_colors10,gap = 25, grouping = clusters10GWAS)
+```
+
+## Running Topic Modeling on Entire Canonical Pathways instead of Individual Genes 
+```{r}
+library(msigdbr) #loading the Molecular Signatures Database package
+
+test  = msigdbr_collections()
+
+X <- Matrix::readMM("QCcounts.mtx")
+barcodes <- read.table("QCcells.txt")
+features <- read.table("QCgenes.txt")
+colnames(X) <- barcodes[,1]
+rownames(X) <- features[,1] 
+
+#s = X[1:58367,]
+#u = X[58368:116734,]
+
+s = X[1:1434,]
+u = X[1435:2868,]
+
+#obtaining and combining all the CP pathways
+canonicalPatways = rbind(msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:BIOCARTA"),
+                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:KEGG"),
+                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:REACTOME"))
+
+canonicalPatways = canonicalPatways[,c(3,4)] #removing unnecessary data columns
+
+#creating 2 versions: one ending with _s for spliced genes and one ending with _u for unspliced	genes
+CPs=canonicalPatways
+CPu=canonicalPatways
+CPs$gene_symbol = paste(CPs$gene_symbol,"s",sep="_")
+CPu$gene_symbol = paste(CPu$gene_symbol,"u",sep="_") 
+
+combined = rbind(CPs,CPu)
+
+#in order to get a matrix consisting of pathways and their corresponding array of genes (nPathways x 2 matrix)
+pathwayCounts = aggregate(combined$gene_symbol, by=list(Category=combined$gs_name), FUN=paste)
+
+geneListS=rownames(s)
+geneListU=rownames(u)
+#Creating pathway x genes (s and u separately) matrix
+i = vector()
+j = vector()
+for (x in 1:length(pathwayCounts$x)) {
+j = c(j, which(geneListS %in% unlist(pathwayCounts$x[ x ])))
+i = c(i,rep(x,each=length(which(geneListS %in% unlist(pathwayCounts$x[ x ])))))
+}
+sp_matrixS <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListS)))
+Matrix::writeMM(sp_matrixS,"sp_matrixS")
+
+i = vector()
+j = vector()
+for (x in 1:length(pathwayCounts$x)) {
+j = c(j, which(geneListU %in% unlist(pathwayCounts$x[ x ])))
+i = c(i,rep(x,each=length(which(geneListU %in% unlist(pathwayCounts$x[ x ])))))
+}
+sp_matrixU <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListU)))
+Matrix::writeMM(sp_matrixU,"sp_matrixU")
+
+#Obtaining the pathway x cells matrices
+pathwayXs = sp_matrixS %*% s
+pathwayXu = sp_matrixU %*% u
+
+rownames(pathwayXs) = paste(pathwayCounts[,1],"s", sep = "_")
+rownames(pathwayXu) = paste(pathwayCounts[,1],"u", sep = "_")
+colnames(pathwayXs) = colnames(X)
+colnames(pathwayXs) = colnames(X)
+
+pathwayXs = as(pathwayXs, "dgCMatrix")
+Matrix::writeMM(pathwayXs, "pathwayXs.mtx")
+
+pathwayXu = as(pathwayXu, "dgCMatrix")
+Matrix::writeMM(pathwayXu, "pathwayXu.mtx")
+
+write.table(rownames(pathwayXs), "pathwayNamesS.txt", quote = F,row.names = F,col.names = F)
+write.table(rownames(pathwayXu), "pathwayNamesU.txt", quote = F,row.names = F,col.names = F)
+
+#running topic modelling just as before ----------------------------------------------------
+
+ratio1 = log(pathwayXu+1)-log(pathwayXs+1)
+rownames(ratio1) = paste(gsub('.{2}$', '', pathwayCountsS[,1]),"u/s",sep = "_")
+ratio1[ratio1<0] = 0 #get rid of negative values
+
+ratio2 = log(pathwayXs+1)-log(pathwayXu+1)
+rownames(ratio2) = paste(gsub('.{2}$', '', pathwayCountsS[,1]),"s/u",sep = "_")
+ratio2[ratio2<0] = 0 #get rid of negative values
+
+X = rbind(ratio1,ratio2)
+
+#removing rows with sum = 0
+X = X[rowSums(X)>0,]
+#removing colums with sum = 0
+X = X[,colSums(X)>0]
+
+X = t(X) #transpose
+X = as(X, "dgCMatrix")
+
+pathwayTopic <- fastTopics::fit_topic_model(X,k = 10)
+save(pathwayTopic,ascii = F,file = "pathwayTopic")
+
+pathwayTopicDE = fastTopics::diff_count_analysis(pathwayTopic,X)
+save(pathwayTopicDE, ascii=FALSE, file="pathwayTopicDE")
+
+```
+
+
+## Entropy calculation
+```{r}
+#Formula for entropy of X: H(X) = - sum(P(xi)*log(P(xi)))
+
+Entropy = apply(fit10$L, 1, function(x) - sum(x*log(x)))
+hist(Entropy,breaks = 100)
+
+Entropy = apply(combinedFit$L, 1, function(x) -sum(x*log(x)))
+hist(Entropy,breaks = 100)
+
+Entropy = apply(combinedFit2$L, 1, function(x) -sum(x*log(x)))
+hist(Entropy,breaks = 100)
+
+#CALCULATE STATISTICS
+
+```
+
+## Validation on the Japanese dataset
+```{r}
+#as seen from the structure plots with case and control labels, some topics are more present in cells which belong to the control samples and vice versa.
+#Control group: 3,7,6
+#Disease group: 10,1,2
+library(htmltools)
+library(DESeq2)
+library(ggplot2)
+
+X <- Matrix::readMM("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.mtx.gz")
+barcodes <- read.table("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.cols.gz")
+features <- read.table("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.rows.gz")
+colnames(X) <- barcodes[,1]
+rownames(X) <- features[,1]
+
+dds  = DESeqDataSetFromMatrix(countData=X, colData =caseControl , design =~labels)
+dds = DESeq(dds)
+
+res = results(dds)
+
+#import results instead of running pipeline
+res = read.table("/Users/samtoussi/Desktop/yppQC/manualDEresults.txt")
+
+
+#Analyzing results
+head(results(dds, tidy = T))
+head(res[order(res$pvalue),])#sorting by p-value
+
+
+#vieweing results
+par(mfrow = c(2,3))
+plotCounts(dds, gene="AK2_s", intgroup="V1")
+
+
+par(mfrow=c(1,1))
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
+with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res, padj<.01 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+
+
+
+```
+
+
