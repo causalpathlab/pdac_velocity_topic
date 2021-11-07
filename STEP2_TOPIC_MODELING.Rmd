@@ -6,14 +6,17 @@ font_size: 12pt
 ---
 
 ```{r include = FALSE}
-#source("Util-rmd.R")
-#data.table::setDTthreads(15)
-#library(patchwork)
-#library(mmutilR)
+source("Util-rmd.R")
+data.table::setDTthreads(15)
+library(patchwork)
+library(mmutilR)
+library(Matrix)
 
-fig.dir <- "Figures/QC"
-#.mkdir(fig.dir)
-velocytoFolder <- "Data/Merged/"
+load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
+
+fig.dir <- "Figures/Topics"
+.mkdir(fig.dir)
+QCFolder <- "Results/QC"
 ```
 
 # Topic Modeling
@@ -25,17 +28,47 @@ velocytoFolder <- "Data/Merged/"
 
 ## Data Preparation
 
-## Put the new data preparation here (don't load everything)
-
-
 ## Running Topic Modeling Code
-```{r}
-llibrary(Matrix)
-library(fastTopics)
 
-X <- Matrix::readMM("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.mtx.gz")
-barcodes <- read.table("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.cols.gz")
-features <- read.table("/projects/molonc/park_lab/sam/pancreasTopic/scripts/QC/yppQC/QC/PDAC_GWAS.rows.gz")
+### Loading the GWAS data
+```{r}
+if(file.exists("Results/QC/PDAC_GWAS.mtx.gz")) {
+    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS.mtx.gz",
+                      row = "Results/QC/PDAC_GWAS.rows.gz",
+                      col = "Results/QC/PDAC_GWAS.cols.gz")
+} else {
+message("WARNING: You should run STEP 1 of the analysis first to obtain the QC data.")
+}
+```
+
+### Obtaining ratios of spliced and unspliced counts for topic modeling
+```{r, eval=FALSE}
+GWASgenes <- as.array(read.table(gwas.data$row)[,1])
+spliced.genes <-  grep('_s', GWASgenes, value=TRUE)
+unspliced.genes <- grep('_u', GWASgenes, value=TRUE)
+
+spliced.gwas.data <- rcpp_mmutil_copy_selected_rows(gwas.data$mtx,
+                                       gwas.data$row,
+                                       gwas.data$col,
+                                       spliced.genes,
+                                       "Results/QC/SPLICED_PDAC_GWAS")
+
+unspliced.gwas.data <- rcpp_mmutil_copy_selected_rows(gwas.data$mtx,
+                                       gwas.data$row,
+                                       gwas.data$col,
+                                       unspliced.genes,
+                                       "Results/QC/UNSPLICED_PDAC_GWAS")
+
+#Unfortunately, there is not the same number of cells due to some cells having no counts after s and u gene selection
+length(as.array(read.table(spliced.gwas.data$col)[,1]))
+length(as.array(read.table(unspliced.gwas.data$col)[,1]))
+```
+
+```{r, eval=FALSE}
+#instead we load everything in memory
+X <- Matrix::readMM(gwas.data$mtx)
+barcodes <- read.table(gwas.data$col)
+features <- read.table(gwas.data$row)
 colnames(X) <- barcodes[,1]
 rownames(X) <- features[,1]
 
@@ -56,13 +89,16 @@ X = rbind(ratio1,ratio2)
 
 #removing rows with sum = 0
 X = X[rowSums(X)>0,]
-#removing colums with sum = 0
+#removing columns with sum = 0
 X = X[,colSums(X)>0]
 
-#Putting th ratios matrix in the cells x genes format preferred by fastTopics
+#Putting the ratios matrix in the cells x genes format preferred by fastTopics
 X=t(X)
 X = as(X, "dgCMatrix")
+```
 
+### Performing topic modeling
+```{r, eval=FALSE}
 fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
 save(fit10, ascii=FALSE, file="fit10_GWAS")
 
@@ -70,18 +106,11 @@ fit10DE = fastTopics::diff_count_analysis(fit10,X)
 save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
 ```
 
-
-
-## Analyzing Topic Modeling Results
-```{r}
+### Viewing topics
+```{r, warning=FALSE, message=FALSE}
 set.seed(1)
-
-#These topics were found using the s/u & u/s ratios.
-load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
-#load("/Users/samtoussi/Desktop/Pancreas/LDAimplementation/upload/fit10")
-
 topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
-structure_plot(fit10,colors = topic_colors10) #view structure plot
+fastTopics::structure_plot(fit10,colors = topic_colors10) #view structure plot
 
 #Labeling cells by their cancer stage
 cellNames =rownames(fit10[["L"]])
@@ -96,18 +125,19 @@ caseControl[grep(PDACII,rownames(caseControl),value=TRUE),"labels"] = "PDACII"
 caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"] = "PDACIII"
 
 #view structure plot, grouped by case/control label
-structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
+fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
+```
 
-
-#Cluster cells based on topics
+## Cluster cells based on topics
+```{r, warning=FALSE, message=FALSE}
 set.seed(1)
 pca10 <- prcomp(fit10$L)$x
 clusters10GWAS <- kmeans(pca10,centers = 15,iter.max = 10000,)$cluster
-structure_plot(fit10,topics = 1:10,colors = topic_colors10,gap = 25, grouping = clusters10GWAS)
+fastTopics::structure_plot(fit10,topics = 1:10,colors = topic_colors10,gap = 25, grouping = clusters10GWAS)
 ```
 
 ## Running Topic Modeling on Entire Canonical Pathways instead of Individual Genes 
-```{r}
+```{r, include = FALSE, eval=FALSE}
 library(msigdbr) #loading the Molecular Signatures Database package
 
 test  = msigdbr_collections()
@@ -209,9 +239,8 @@ save(pathwayTopicDE, ascii=FALSE, file="pathwayTopicDE")
 
 ```
 
-
 ## Entropy calculation
-```{r}
+```{r, include = FALSE, eval=FALSE}
 #Formula for entropy of X: H(X) = - sum(P(xi)*log(P(xi)))
 
 Entropy = apply(fit10$L, 1, function(x) - sum(x*log(x)))
@@ -228,7 +257,7 @@ hist(Entropy,breaks = 100)
 ```
 
 ## Validation on the Japanese dataset
-```{r}
+```{r, include = FALSE,eval=FALSE }
 #as seen from the structure plots with case and control labels, some topics are more present in cells which belong to the control samples and vice versa.
 #Control group: 3,7,6
 #Disease group: 10,1,2
@@ -265,8 +294,6 @@ par(mfrow=c(1,1))
 with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
 with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
 with(subset(res, padj<.01 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
-
-
 
 
 ```
