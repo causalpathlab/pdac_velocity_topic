@@ -13,6 +13,9 @@ library(mmutilR)
 library(Matrix)
 
 load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
+#GWASandBG was Updated 
+load("/Users/samtoussi/Desktop/yppQC/fit10_GWASandBG")
+
 
 fig.dir <- "Figures/Topics"
 .mkdir(fig.dir)
@@ -136,7 +139,75 @@ clusters10GWAS <- kmeans(pca10,centers = 15,iter.max = 10000,)$cluster
 fastTopics::structure_plot(fit10,topics = 1:10,colors = topic_colors10,gap = 25, grouping = clusters10GWAS)
 ```
 
-## Running Topic Modeling on Entire Canonical Pathways instead of Individual Genes 
+
+## Phase Diagrams
+
+```{r}
+normS = Seurat::NormalizeData(s)
+normU = Seurat::NormalizeData(u)
+plot(normS["MGAT5_s",], normU["MGAT5_u",]) #activated
+plot(normS["CTRB1_s",], normU["CTRB1_u",]) #deactivated
+#PRSS1 and S100A6 have no unspliced counts which is making them seem to be turned off with a high s/u ratio
+# some other interesting ones CUX1, CTRC, WWOX
+
+#cluster colors: 1 = lightpink, 2 = darkgreen, 3 = snow4, 4 = orangered4, 5 = red , 6 = yellow, 7 = orange, 8 = red4, 9 = snow3, 10 = steelblue1, 11 = hotpink, 12 = lawngreen , 13 = purple , 14 = royalblue , 15 = mediumpurple
+
+clustCol = c("lightpink", "darkgreen", "snow4", "orangered4","red","yellow","orange","red4","snow3","steelblue1","hotpink","lawngreen","purple","royalblue","mediumpurple")[as.factor(clusters10GWAS)]
+#-------------------
+topicCol = c("lightpink", "cyan", "snow4", "orangered4","red","orange","orange","orangered4","snow3","blue","lightpink","lawngreen","black","blue","black")[as.factor(clusters10GWAS)]
+
+plot(normS["MGAT5_s",], normU["MGAT5_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["MGAT5_s",], normU["MGAT5_u",], col= topicCol , pch = 19, cex = 0.3)
+plot(normS["MGAT5_s",], normU["MGAT5_u",], col= c("blue", "red", "red", "red")[as.factor(caseControl$labels)] , pch = 19, cex = 0.3,)
+
+caseControl$labels
+
+plot(normS["CUX1_s",], normU["CUX1_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["WWOX_s",], normU["WWOX_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["CTRB1_s",], normU["CTRB1_u",], col= clustCol , pch = 19, cex = 0.3)
+
+```
+
+
+```{r}
+plot(normS["FTL_s",], normU["FTL_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["CD74_s",], normU["CD74_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["GLIS3_s",], normU["GLIS3_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["CCSER1_s",], normU["CCSER1_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["HDAC9_s",], normU["HDAC9_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["PTEN_s",], normU["PTEN_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["SPARC_s",], normU["SPARC_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["TMSB10_s",], normU["TMSB10_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["SPINK1_s",], normU["SPINK1_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["PPARG_s",], normU["PPARG_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["MMP7_s",], normU["MMP7_u",], col= clustCol , pch = 19, cex = 0.3)
+plot(normS["ASAP1_s",], normU["ASAP1_u",], col= clustCol , pch = 19, cex = 0.3)
+
+
+miniMetaS = colMeans(as.matrix(normS[c("MGAT5_s","CUX1_s","PPARG_s", "ACTN4_s"),]))
+miniMetaU = colMeans(as.matrix(normU[c("MGAT5_u","CUX1_u","PPARG_u", "ACTN4_u"),]))
+
+miniMetaS = colMeans(as.matrix(normS[c("CFTR_s", "WWOX_s", "CTRC_s", "MGAT5_s", "CUX1_s"),]))
+miniMetaU = colMeans(as.matrix(normU[c("CFTR_u", "WWOX_u", "CTRC_u", "MGAT5_u", "CUX1_u"),]))
+
+miniMetaS = colMeans(as.matrix(normS))
+miniMetaU = colMeans(as.matrix(normU))
+
+plot(miniMetaS,miniMetaU, col= clustCol , pch = 19, cex = 0.3)
+
+plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.8)
+plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.3)
+plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.1)
+
+plot(miniMetaS,miniMetaU, col= c("blue", "red", "red", "red")[as.factor(caseControl$labels)] , pch = 19, cex = 0.05)
+
+test= as.factor(caseControl$labels)
+
+head(miniMetaS)
+```
+
+
+## Preparing data for Canonical Pathways Analysis 
 ```{r, include = FALSE, eval=FALSE}
 library(msigdbr) #loading the Molecular Signatures Database package
 
@@ -211,8 +282,9 @@ Matrix::writeMM(pathwayXu, "pathwayXu.mtx")
 write.table(rownames(pathwayXs), "pathwayNamesS.txt", quote = F,row.names = F,col.names = F)
 write.table(rownames(pathwayXu), "pathwayNamesU.txt", quote = F,row.names = F,col.names = F)
 
-#running topic modelling just as before ----------------------------------------------------
+```
 
+```{r}
 ratio1 = log(pathwayXu+1)-log(pathwayXs+1)
 rownames(ratio1) = paste(gsub('.{2}$', '', pathwayCountsS[,1]),"u/s",sep = "_")
 ratio1[ratio1<0] = 0 #get rid of negative values
@@ -230,7 +302,10 @@ X = X[,colSums(X)>0]
 
 X = t(X) #transpose
 X = as(X, "dgCMatrix")
+```
 
+## Running Topic Modeling on Canonical Pathways instead of Individual Genes
+```{r}
 pathwayTopic <- fastTopics::fit_topic_model(X,k = 10)
 save(pathwayTopic,ascii = F,file = "pathwayTopic")
 
@@ -277,7 +352,7 @@ dds = DESeq(dds)
 res = results(dds)
 
 #import results instead of running pipeline
-res = read.table("/Users/samtoussi/Desktop/yppQC/manualDEresults.txt")
+res = read.table("/Users/samtoussi/Desktop/yppQC/ddsResultsGWASclusters.txt")
 
 
 #Analyzing results
@@ -289,9 +364,12 @@ head(res[order(res$pvalue),])#sorting by p-value
 par(mfrow = c(2,3))
 plotCounts(dds, gene="AK2_s", intgroup="V1")
 
+plotCounts(dds, gene="AK2_s", intgroup="topics")
+
+
 
 par(mfrow=c(1,1))
-with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-0.5,0.5)))
 with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
 with(subset(res, padj<.01 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
 
