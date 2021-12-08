@@ -10,16 +10,16 @@ source("Util-rmd.R")
 data.table::setDTthreads(15)
 library(patchwork)
 library(mmutilR)
+library(fastTopics)
 library(Matrix)
 
-load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
+#load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
 #GWASandBG was Updated 
 load("/Users/samtoussi/Desktop/yppQC/fit10_GWASandBG")
 
-
 fig.dir <- "Figures/Topics"
 .mkdir(fig.dir)
-QCFolder <- "Results/QC"
+QCFolder <- "Results/QC/"
 ```
 
 # Topic Modeling
@@ -31,76 +31,39 @@ QCFolder <- "Results/QC"
 
 ## Data Preparation
 
-## Running Topic Modeling Code
-
 ### Loading the GWAS data
 ```{r}
-if(file.exists("Results/QC/PDAC_GWAS.mtx.gz")) {
-    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS.mtx.gz",
-                      row = "Results/QC/PDAC_GWAS.rows.gz",
-                      col = "Results/QC/PDAC_GWAS.cols.gz")
+if(file.exists("Results/QC/PDAC_GWAS_BG.mtx.gz")) {
+    gwas.bg <- list(mtx = "Results/QC/PDAC_GWAS_BG.mtx.gz",
+                      row = "Results/QC/PDAC_GWAS_BG.rows.gz",
+                      col = "Results/QC/PDAC_GWAS_BG.cols.gz")
 } else {
 message("WARNING: You should run STEP 1 of the analysis first to obtain the QC data.")
 }
 ```
 
 ### Obtaining ratios of spliced and unspliced counts for topic modeling
-```{r, eval=FALSE}
-GWASgenes <- as.array(read.table(gwas.data$row)[,1])
-spliced.genes <-  grep('_s', GWASgenes, value=TRUE)
-unspliced.genes <- grep('_u', GWASgenes, value=TRUE)
-
-spliced.gwas.data <- rcpp_mmutil_copy_selected_rows(gwas.data$mtx,
-                                       gwas.data$row,
-                                       gwas.data$col,
-                                       spliced.genes,
-                                       "Results/QC/SPLICED_PDAC_GWAS")
-
-unspliced.gwas.data <- rcpp_mmutil_copy_selected_rows(gwas.data$mtx,
-                                       gwas.data$row,
-                                       gwas.data$col,
-                                       unspliced.genes,
-                                       "Results/QC/UNSPLICED_PDAC_GWAS")
-
-#Unfortunately, there is not the same number of cells due to some cells having no counts after s and u gene selection
-length(as.array(read.table(spliced.gwas.data$col)[,1]))
-length(as.array(read.table(unspliced.gwas.data$col)[,1]))
-```
 
 ```{r, eval=FALSE}
-#instead we load everything in memory
-X <- Matrix::readMM(gwas.data$mtx)
-barcodes <- read.table(gwas.data$col)
-features <- read.table(gwas.data$row)
-colnames(X) <- barcodes[,1]
-rownames(X) <- features[,1]
+X <- Matrix::readMM(gwas.bg$mtx)
+colnames(X) <- read.table(gwas.bg$col)$V1
+rownames(X) <- read.table(gwas.bg$row)$V1
 
-ngenes = as.numeric(dim(X)[1])
+s <- X[rownames(X)[str_ends(rownames(X), "_s")],]
+u <- X[rownames(X)[str_ends(rownames(X), "_u")],]
+#Scaling unspliced counts to have same mean as spliced
+u = u * (mean(s)/mean(u))
+u = log(u+1)-log(s+1) #u/s ratio
+X = rbind(u,-u)
+rownames(X) <- str_replace_all(read.table(gwas.bg$row)$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
+X[X<0] = 0 #get rid of negative values
+X = X[rowSums(X)>0,colSums(X)>0] #removing rows and columns with sum = 0
 
-#separating spliced and unspliced counts
-s = X[1:(ngenes/2),]
-u = X[(ngenes/2+1):ngenes,]
-
-#Finding ratios between spliced and unspliced counts and vice versa
-ratio1 = log(u+1)-log(s+1)
-rownames(ratio1) = paste(gsub('.{2}$', '', rownames(s)),"u/s",sep = "_")
-ratio1[ratio1<0] = 0 #get rid of negative values
-ratio2 = log(s+1)-log(u+1)
-rownames(ratio2) = paste(gsub('.{2}$', '', rownames(s)),"s/u",sep = "_")
-ratio2[ratio2<0] = 0 #get rid of negative values
-X = rbind(ratio1,ratio2)
-
-#removing rows with sum = 0
-X = X[rowSums(X)>0,]
-#removing columns with sum = 0
-X = X[,colSums(X)>0]
-
-#Putting the ratios matrix in the cells x genes format preferred by fastTopics
-X=t(X)
+X=t(X) #Putting the ratios matrix in the cells x genes format preferred by fastTopics
 X = as(X, "dgCMatrix")
 ```
 
-### Performing topic modeling
+## Performing topic modeling using fastTopics
 ```{r, eval=FALSE}
 fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
 save(fit10, ascii=FALSE, file="fit10_GWAS")
@@ -113,13 +76,10 @@ save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
 ```{r, warning=FALSE, message=FALSE}
 set.seed(1)
 topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
-fastTopics::structure_plot(fit10,colors = topic_colors10) #view structure plot
 
 #Labeling cells by their cancer stage
-cellNames =rownames(fit10[["L"]])
-caseControl = as.data.frame(cellNames)
-caseControl$labels = "Control"
-rownames(caseControl)= caseControl$cellNames
+cellNames = rownames(fit10[["L"]])
+caseControl = data.frame(labels = matrix("Control", nrow = length(cellNames)), row.names = cellNames)
 PDACI = 'CRR241799|CRR034500|CRR034512|CRR034513|CRR034519|CRR034517|CRR034516|CRR241802|CRR034505'
 PDACII = 'CRR241798|CRR034499|CRR034501|CRR034504|CRR241803|CRR241804|CRR241800|CRR034511|CRR034506|CRR034510|CRR034509|CRR241801'
 PDACIII = 'CRR241805|CRR034503|CRR034507'
@@ -131,249 +91,41 @@ caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"] = "PDACIII"
 fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
 ```
 
-## Cluster cells based on topics
+##Heatmap
+```{r, warning=FALSE, message=FALSE}
+geneRatioLabels = str_replace_all(read.table("GWASgenes.txt")$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
+
+#ranking the genes for each topic, by relative "gene ratio" expression levels (high u/s signifies increase in expression, and s/u is opposite)
+rankedGenesRatios =  data.frame("k1" = sort(fit10[["F"]][,1], decreasing = T))
+rankedGenes = data.frame("k1" = names(sort(fit10[["F"]][,1], decreasing = T)))
+newGenes = data.frame("k1" = rankedGenes[!(rankedGenes[,1] %in% geneRatioLabels),1])
+
+for (.x in 1:10) {
+    rankedGenes[,paste0("k", .x)] = names(sort(fit10[["F"]][, .x], decreasing = T))
+    rankedGenesRatios[,paste0("k", .x)] =  sort(fit10[["F"]][, .x], decreasing = T)
+    newGenes[,paste0("k", .x)] = rankedGenes[!(rankedGenes[, .x] %in% geneRatioLabels), .x]
+}
+
+gplots::heatmap.2(as.matrix(rankedGenesRatios[1:10,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=gplots::bluered(100), cellnote =as.matrix(rankedGenes[1:10,]), notecex = 0.5, notecol = "black", colsep=1:10,sepcolor="white",sepwidth=c(0.05,0.05), key.title = "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value" )
+```
+
+##Visualizing the structure of the multinomial topic model topic proportions by projection onto a 2-d surface
 ```{r, warning=FALSE, message=FALSE}
 set.seed(1)
-pca10 <- prcomp(fit10$L)$x
-clusters10GWAS <- kmeans(pca10,centers = 15,iter.max = 10000,)$cluster
-fastTopics::structure_plot(fit10,topics = 1:10,colors = topic_colors10,gap = 25, grouping = clusters10GWAS)
+umap_plot(fit10)
+Y <- umap_from_topics(fit10)
+quickplot(Y[,1],Y[,2], color = caseControl$labels) + geom_point(size = 0.005)
 ```
 
 
-## Phase Diagrams
-
-```{r}
-normS = Seurat::NormalizeData(s)
-normU = Seurat::NormalizeData(u)
-plot(normS["MGAT5_s",], normU["MGAT5_u",]) #activated
-plot(normS["CTRB1_s",], normU["CTRB1_u",]) #deactivated
-#PRSS1 and S100A6 have no unspliced counts which is making them seem to be turned off with a high s/u ratio
-# some other interesting ones CUX1, CTRC, WWOX
-
-#cluster colors: 1 = lightpink, 2 = darkgreen, 3 = snow4, 4 = orangered4, 5 = red , 6 = yellow, 7 = orange, 8 = red4, 9 = snow3, 10 = steelblue1, 11 = hotpink, 12 = lawngreen , 13 = purple , 14 = royalblue , 15 = mediumpurple
-
-clustCol = c("lightpink", "darkgreen", "snow4", "orangered4","red","yellow","orange","red4","snow3","steelblue1","hotpink","lawngreen","purple","royalblue","mediumpurple")[as.factor(clusters10GWAS)]
-#-------------------
-topicCol = c("lightpink", "cyan", "snow4", "orangered4","red","orange","orange","orangered4","snow3","blue","lightpink","lawngreen","black","blue","black")[as.factor(clusters10GWAS)]
-
-plot(normS["MGAT5_s",], normU["MGAT5_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["MGAT5_s",], normU["MGAT5_u",], col= topicCol , pch = 19, cex = 0.3)
-plot(normS["MGAT5_s",], normU["MGAT5_u",], col= c("blue", "red", "red", "red")[as.factor(caseControl$labels)] , pch = 19, cex = 0.3,)
-
-caseControl$labels
-
-plot(normS["CUX1_s",], normU["CUX1_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["WWOX_s",], normU["WWOX_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["CTRB1_s",], normU["CTRB1_u",], col= clustCol , pch = 19, cex = 0.3)
-
+##Barcharts to visualize the relationship between the loadings (or mixture proportions) and case/control labels
+```{r, warning=FALSE, message=FALSE}
+set.seed(1)
+loadings_plot(fit10, as.factor(caseControl$labels))
 ```
 
 
-```{r}
-plot(normS["FTL_s",], normU["FTL_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["CD74_s",], normU["CD74_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["GLIS3_s",], normU["GLIS3_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["CCSER1_s",], normU["CCSER1_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["HDAC9_s",], normU["HDAC9_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["PTEN_s",], normU["PTEN_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["SPARC_s",], normU["SPARC_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["TMSB10_s",], normU["TMSB10_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["SPINK1_s",], normU["SPINK1_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["PPARG_s",], normU["PPARG_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["MMP7_s",], normU["MMP7_u",], col= clustCol , pch = 19, cex = 0.3)
-plot(normS["ASAP1_s",], normU["ASAP1_u",], col= clustCol , pch = 19, cex = 0.3)
 
 
-miniMetaS = colMeans(as.matrix(normS[c("MGAT5_s","CUX1_s","PPARG_s", "ACTN4_s"),]))
-miniMetaU = colMeans(as.matrix(normU[c("MGAT5_u","CUX1_u","PPARG_u", "ACTN4_u"),]))
-
-miniMetaS = colMeans(as.matrix(normS[c("CFTR_s", "WWOX_s", "CTRC_s", "MGAT5_s", "CUX1_s"),]))
-miniMetaU = colMeans(as.matrix(normU[c("CFTR_u", "WWOX_u", "CTRC_u", "MGAT5_u", "CUX1_u"),]))
-
-miniMetaS = colMeans(as.matrix(normS))
-miniMetaU = colMeans(as.matrix(normU))
-
-plot(miniMetaS,miniMetaU, col= clustCol , pch = 19, cex = 0.3)
-
-plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.8)
-plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.3)
-plot(miniMetaS,miniMetaU, col= topicCol , pch = 19, cex = 0.1)
-
-plot(miniMetaS,miniMetaU, col= c("blue", "red", "red", "red")[as.factor(caseControl$labels)] , pch = 19, cex = 0.05)
-
-test= as.factor(caseControl$labels)
-
-head(miniMetaS)
-```
-
-
-## Preparing data for Canonical Pathways Analysis 
-```{r, include = FALSE, eval=FALSE}
-library(msigdbr) #loading the Molecular Signatures Database package
-
-test  = msigdbr_collections()
-
-X <- Matrix::readMM("QCcounts.mtx")
-barcodes <- read.table("QCcells.txt")
-features <- read.table("QCgenes.txt")
-colnames(X) <- barcodes[,1]
-rownames(X) <- features[,1] 
-
-#s = X[1:58367,]
-#u = X[58368:116734,]
-
-s = X[1:1434,]
-u = X[1435:2868,]
-
-#obtaining and combining all the CP pathways
-canonicalPatways = rbind(msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:BIOCARTA"),
-                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:KEGG"),
-                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:REACTOME"))
-
-canonicalPatways = canonicalPatways[,c(3,4)] #removing unnecessary data columns
-
-#creating 2 versions: one ending with _s for spliced genes and one ending with _u for unspliced	genes
-CPs=canonicalPatways
-CPu=canonicalPatways
-CPs$gene_symbol = paste(CPs$gene_symbol,"s",sep="_")
-CPu$gene_symbol = paste(CPu$gene_symbol,"u",sep="_") 
-
-combined = rbind(CPs,CPu)
-
-#in order to get a matrix consisting of pathways and their corresponding array of genes (nPathways x 2 matrix)
-pathwayCounts = aggregate(combined$gene_symbol, by=list(Category=combined$gs_name), FUN=paste)
-
-geneListS=rownames(s)
-geneListU=rownames(u)
-#Creating pathway x genes (s and u separately) matrix
-i = vector()
-j = vector()
-for (x in 1:length(pathwayCounts$x)) {
-j = c(j, which(geneListS %in% unlist(pathwayCounts$x[ x ])))
-i = c(i,rep(x,each=length(which(geneListS %in% unlist(pathwayCounts$x[ x ])))))
-}
-sp_matrixS <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListS)))
-Matrix::writeMM(sp_matrixS,"sp_matrixS")
-
-i = vector()
-j = vector()
-for (x in 1:length(pathwayCounts$x)) {
-j = c(j, which(geneListU %in% unlist(pathwayCounts$x[ x ])))
-i = c(i,rep(x,each=length(which(geneListU %in% unlist(pathwayCounts$x[ x ])))))
-}
-sp_matrixU <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListU)))
-Matrix::writeMM(sp_matrixU,"sp_matrixU")
-
-#Obtaining the pathway x cells matrices
-pathwayXs = sp_matrixS %*% s
-pathwayXu = sp_matrixU %*% u
-
-rownames(pathwayXs) = paste(pathwayCounts[,1],"s", sep = "_")
-rownames(pathwayXu) = paste(pathwayCounts[,1],"u", sep = "_")
-colnames(pathwayXs) = colnames(X)
-colnames(pathwayXs) = colnames(X)
-
-pathwayXs = as(pathwayXs, "dgCMatrix")
-Matrix::writeMM(pathwayXs, "pathwayXs.mtx")
-
-pathwayXu = as(pathwayXu, "dgCMatrix")
-Matrix::writeMM(pathwayXu, "pathwayXu.mtx")
-
-write.table(rownames(pathwayXs), "pathwayNamesS.txt", quote = F,row.names = F,col.names = F)
-write.table(rownames(pathwayXu), "pathwayNamesU.txt", quote = F,row.names = F,col.names = F)
-
-```
-
-```{r}
-ratio1 = log(pathwayXu+1)-log(pathwayXs+1)
-rownames(ratio1) = paste(gsub('.{2}$', '', pathwayCountsS[,1]),"u/s",sep = "_")
-ratio1[ratio1<0] = 0 #get rid of negative values
-
-ratio2 = log(pathwayXs+1)-log(pathwayXu+1)
-rownames(ratio2) = paste(gsub('.{2}$', '', pathwayCountsS[,1]),"s/u",sep = "_")
-ratio2[ratio2<0] = 0 #get rid of negative values
-
-X = rbind(ratio1,ratio2)
-
-#removing rows with sum = 0
-X = X[rowSums(X)>0,]
-#removing colums with sum = 0
-X = X[,colSums(X)>0]
-
-X = t(X) #transpose
-X = as(X, "dgCMatrix")
-```
-
-## Running Topic Modeling on Canonical Pathways instead of Individual Genes
-```{r}
-pathwayTopic <- fastTopics::fit_topic_model(X,k = 10)
-save(pathwayTopic,ascii = F,file = "pathwayTopic")
-
-pathwayTopicDE = fastTopics::diff_count_analysis(pathwayTopic,X)
-save(pathwayTopicDE, ascii=FALSE, file="pathwayTopicDE")
-
-```
-
-## Entropy calculation
-```{r, include = FALSE, eval=FALSE}
-#Formula for entropy of X: H(X) = - sum(P(xi)*log(P(xi)))
-
-Entropy = apply(fit10$L, 1, function(x) - sum(x*log(x)))
-hist(Entropy,breaks = 100)
-
-Entropy = apply(combinedFit$L, 1, function(x) -sum(x*log(x)))
-hist(Entropy,breaks = 100)
-
-Entropy = apply(combinedFit2$L, 1, function(x) -sum(x*log(x)))
-hist(Entropy,breaks = 100)
-
-#CALCULATE STATISTICS
-
-```
-
-## Validation on the Japanese dataset
-```{r, include = FALSE,eval=FALSE }
-#as seen from the structure plots with case and control labels, some topics are more present in cells which belong to the control samples and vice versa.
-#Control group: 3,7,6
-#Disease group: 10,1,2
-library(htmltools)
-library(DESeq2)
-library(ggplot2)
-
-X <- Matrix::readMM("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.mtx.gz")
-barcodes <- read.table("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.cols.gz")
-features <- read.table("/Users/samtoussi/Desktop/yppQC/QC/PDAC_GWAS_BG.rows.gz")
-colnames(X) <- barcodes[,1]
-rownames(X) <- features[,1]
-
-dds  = DESeqDataSetFromMatrix(countData=X, colData =caseControl , design =~labels)
-dds = DESeq(dds)
-
-res = results(dds)
-
-#import results instead of running pipeline
-res = read.table("/Users/samtoussi/Desktop/yppQC/ddsResultsGWASclusters.txt")
-
-
-#Analyzing results
-head(results(dds, tidy = T))
-head(res[order(res$pvalue),])#sorting by p-value
-
-
-#vieweing results
-par(mfrow = c(2,3))
-plotCounts(dds, gene="AK2_s", intgroup="V1")
-
-plotCounts(dds, gene="AK2_s", intgroup="topics")
-
-
-
-par(mfrow=c(1,1))
-with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-0.5,0.5)))
-with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
-with(subset(res, padj<.01 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
-
-
-```
 
 
