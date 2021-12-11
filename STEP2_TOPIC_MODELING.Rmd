@@ -11,11 +11,13 @@ data.table::setDTthreads(15)
 library(patchwork)
 library(mmutilR)
 library(fastTopics)
+library(tidyverse)
 library(Matrix)
 
 #load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
 #GWASandBG was Updated 
 load("/Users/samtoussi/Desktop/yppQC/fit10_GWASandBG")
+load("/Users/samtoussi/Desktop/yppQC/fit10DE_GWASandBG")
 
 fig.dir <- "Figures/Topics"
 .mkdir(fig.dir)
@@ -52,15 +54,15 @@ rownames(X) <- read.table(gwas.bg$row)$V1
 s <- X[rownames(X)[str_ends(rownames(X), "_s")],]
 u <- X[rownames(X)[str_ends(rownames(X), "_u")],]
 #Scaling unspliced counts to have same mean as spliced
-u = u * (mean(s)/mean(u))
-u = log(u+1)-log(s+1) #u/s ratio
-X = rbind(u,-u)
+u <- u * (mean(s)/mean(u))
+u <- log(u+1)-log(s+1) #u/s ratio
+X <- rbind(u,-u)
 rownames(X) <- str_replace_all(read.table(gwas.bg$row)$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
-X[X<0] = 0 #get rid of negative values
-X = X[rowSums(X)>0,colSums(X)>0] #removing rows and columns with sum = 0
+X[X<0]  <-  0 #get rid of negative values
+X  <-  X[rowSums(X)>0,colSums(X)>0] #removing rows and columns with sum = 0
 
-X=t(X) #Putting the ratios matrix in the cells x genes format preferred by fastTopics
-X = as(X, "dgCMatrix")
+X <- t(X) #Putting the ratios matrix in the cells x genes format preferred by fastTopics
+X <-  as(X, "dgCMatrix")
 ```
 
 ## Performing topic modeling using fastTopics
@@ -68,7 +70,7 @@ X = as(X, "dgCMatrix")
 fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
 save(fit10, ascii=FALSE, file="fit10_GWAS")
 
-fit10DE = fastTopics::diff_count_analysis(fit10,X)
+fit10DE  <-  fastTopics::diff_count_analysis(fit10,X)
 save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
 ```
 
@@ -78,14 +80,14 @@ set.seed(1)
 topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
 
 #Labeling cells by their cancer stage
-cellNames = rownames(fit10[["L"]])
-caseControl = data.frame(labels = matrix("Control", nrow = length(cellNames)), row.names = cellNames)
-PDACI = 'CRR241799|CRR034500|CRR034512|CRR034513|CRR034519|CRR034517|CRR034516|CRR241802|CRR034505'
-PDACII = 'CRR241798|CRR034499|CRR034501|CRR034504|CRR241803|CRR241804|CRR241800|CRR034511|CRR034506|CRR034510|CRR034509|CRR241801'
-PDACIII = 'CRR241805|CRR034503|CRR034507'
-caseControl[grep(PDACI,rownames(caseControl),value=TRUE),"labels"] = "PDACI"
-caseControl[grep(PDACII,rownames(caseControl),value=TRUE),"labels"] = "PDACII"
-caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"] = "PDACIII"
+cellNames  <-  rownames(fit10[["L"]])
+caseControl  <-  data.frame(labels = matrix("Control", nrow = length(cellNames)), row.names = cellNames)
+PDACI  <-  'CRR241799|CRR034500|CRR034512|CRR034513|CRR034519|CRR034517|CRR034516|CRR241802|CRR034505'
+PDACII  <-  'CRR241798|CRR034499|CRR034501|CRR034504|CRR241803|CRR241804|CRR241800|CRR034511|CRR034506|CRR034510|CRR034509|CRR241801'
+PDACIII  <-  'CRR241805|CRR034503|CRR034507'
+caseControl[grep(PDACI,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACI"
+caseControl[grep(PDACII,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACII"
+caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACIII"
 
 #view structure plot, grouped by case/control label
 fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
@@ -93,20 +95,51 @@ fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$
 
 ##Heatmap
 ```{r, warning=FALSE, message=FALSE}
+#modified LFC to attribute an opposite sign value to s/u ratios (for heatmap colouring purposes)
+modLFC = fit10DE$beta
+modLFC[str_ends(rownames(modLFC), "_s/u"),]  <-  -fit10DE$beta[str_ends(rownames(modLFC), "_s/u"),]
+
 geneRatioLabels = str_replace_all(read.table("GWASgenes.txt")$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
 
 #ranking the genes for each topic, by relative "gene ratio" expression levels (high u/s signifies increase in expression, and s/u is opposite)
-rankedGenesRatios =  data.frame("k1" = sort(fit10[["F"]][,1], decreasing = T))
-rankedGenes = data.frame("k1" = names(sort(fit10[["F"]][,1], decreasing = T)))
-newGenes = data.frame("k1" = rankedGenes[!(rankedGenes[,1] %in% geneRatioLabels),1])
+rankedGenesRatios  <-   data.frame("k1" = sort(fit10[["F"]][,1], decreasing = T))
+rankedGenes  <-  data.frame("k1" = names(sort(fit10[["F"]][,1], decreasing = T)))
+newGenes  <-  data.frame("k1" = rankedGenes[!(rankedGenes[,1] %in% geneRatioLabels),1])
+rankedLFC  <-  data.frame("k1" = modLFC[order(fit10[["F"]][,1], decreasing = T),1])
 
 for (.x in 1:10) {
-    rankedGenes[,paste0("k", .x)] = names(sort(fit10[["F"]][, .x], decreasing = T))
-    rankedGenesRatios[,paste0("k", .x)] =  sort(fit10[["F"]][, .x], decreasing = T)
-    newGenes[,paste0("k", .x)] = rankedGenes[!(rankedGenes[, .x] %in% geneRatioLabels), .x]
+    rankedGenes[,paste0("k", .x)]  <-  names(sort(fit10[["F"]][, .x], decreasing = T))
+    rankedGenesRatios[,paste0("k", .x)]  <-   sort(fit10[["F"]][, .x], decreasing = T)
+    newGenes[,paste0("k", .x)]  <-  rankedGenes[!(rankedGenes[, .x] %in% geneRatioLabels), .x]
+    rankedLFC[,paste0("k", .x)]  <-  modLFC[order(fit10[["F"]][, .x], decreasing = T), .x]
+
 }
 
-gplots::heatmap.2(as.matrix(rankedGenesRatios[1:10,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=gplots::bluered(100), cellnote =as.matrix(rankedGenes[1:10,]), notecex = 0.5, notecol = "black", colsep=1:10,sepcolor="white",sepwidth=c(0.05,0.05), key.title = "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value" )
+
+##NEEDS FIXING
+
+myColors <- c(seq(-25,-3,length=100),seq(-2.9,2.9,length=100),seq(3,25,length=100))
+myPalette <- colorRampPalette(c("red", "black", "green"))(n = 299)
+
+gplots::heatmap.2(as.matrix(rankedLFC[1:15,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=myPalette, cellnote =as.matrix(rankedGenes[1:15,]), notecex = 0.5, notecol = "white", colsep=1:15,sepcolor="white",sepwidth=c(0.05,0.05), key.title  <-  "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value",na.color = "black", breaks = myColors)
+
+
+myColors1  <-  c(seq(0,2.9,length=100),seq(3,25,length=100))
+myPalette1 <- colorRampPalette(c("black", "green"))(n = 199)
+
+gplots::heatmap.2(matrix(10,2,2),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,labCol = NA,srtCol = 0,trace = "none", density = "none", col=myPalette1, notecex = 0.5, notecol = "white", key.xlab ="u/s Ratio LFC",na.color = "black", breaks = myColors1, keysize = 16 )
+
+myColors2  <-  c(seq(0,2.9,length=100),seq(3,25,length=100))
+myPalette2 <- colorRampPalette(c("black", "red"))(n = 199)
+
+gplots::heatmap.2(matrix(10,2,2),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,labCol = NA,srtCol = 0,trace = "none", density = "none", col <- myPalette2, notecex = 0.5, notecol = "white", key.xlab ="u/s Ratio LFC",na.color = "black", breaks = myColors2, keysize = 16 )
+
+
+
+plot(rep(0,199),col=myPalette[seq(0,199,10)],pch=19,cex=2)
+
+#gplots::heatmap.2(as.matrix(rankedGenesRatios[1:10,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=gplots::bluered(100), cellnote =as.matrix(rankedGenes[1:10,]), notecex = 0.5, notecol = "black", colsep=1:10,sepcolor="white",sepwidth=c(0.05,0.05), key.title = "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value" )
+
 ```
 
 ##Visualizing the structure of the multinomial topic model topic proportions by projection onto a 2-d surface
