@@ -168,7 +168,7 @@ save(pathwayTopicDE, ascii=FALSE, file="pathwayTopicDE")
 ```
 
 ### Viewing Gene Topics
-```{r, warning=FALSE, message=FALSE}
+```{r, warning=FALSE, message=FALSE, results = FALSE}
 set.seed(1)
 topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
 #Labeling cells by their cancer stage
@@ -197,9 +197,9 @@ caseControlPathways[grep(PDACIII,rownames(caseControlPathways),value=TRUE),"labe
 #view structure plot, grouped by case/control label
 fastTopics::structure_plot(pathwayTopic,colors = topic_colors10,grouping = caseControlPathways$labels, gap = 25,topics = 1:10) #view structure plot
 ```
-## Barcharts to visualize the relationship between the Mixture Proportions and case/control labels
 
-### Gene Mixture Proportions
+
+### Barcharts to visualize the relationship between the gene mixture proportions and case/control labels
 ```{r, warning=FALSE, message=FALSE, results = FALSE}
 set.seed(1)
 
@@ -221,7 +221,7 @@ loadings_plot(pathwayTopic, as.factor(caseControlPathways$labels), ggplot_call =
 
 ```
 
-## Heatmap
+### Heatmap
 ```{r, warning=FALSE, message=FALSE}
 #modified LFC to attribute an opposite sign value to s/u ratios (for heatmap colouring purposes)
 modLFC = fit10DE$beta
@@ -243,7 +243,9 @@ myPalette <- colorRampPalette(c("red", "black", "green"))(n = 299)
 gplots::heatmap.2(as.matrix(rankedLFC[1:15,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=myPalette, cellnote =as.matrix(rankedGenes[1:15,]), notecex = 0.5, notecol = "white", colsep=1:15,sepcolor="white",sepwidth=c(0.001,0.001), key.title = "Adjusted LFC", key.xlab ="Adjusted LFC",na.color = "black", breaks = myColors)
 
 ```
-## Phase plot for a sample gene (MGAT5)
+
+
+### Phase plot for a sample gene (MGAT5)
 ```{r}
 sMg = NormalizeData(s)
 uMg = NormalizeData(u)
