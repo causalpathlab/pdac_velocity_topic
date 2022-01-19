@@ -5,23 +5,28 @@ date: "`r Sys.Date()`"
 font_size: 12pt
 ---
 
+
+
 ```{r include = FALSE}
 source("Util-rmd.R")
 data.table::setDTthreads(15)
 library(patchwork)
-library(mmutilR)
+#library(mmutilR)
 library(fastTopics)
 library(tidyverse)
 library(Matrix)
+library(cowplot)
+library(Seurat)
 
-#load("/Users/samtoussi/Desktop/yppQC/fit10_GWAS")
-#GWASandBG was Updated 
-load("/Users/samtoussi/Desktop/yppQC/fit10_GWASandBG")
-load("/Users/samtoussi/Desktop/yppQC/fit10DE_GWASandBG")
+load("/Users/Rose/Desktop/fit10_GWASandBG")
+load("/Users/Rose/Desktop/fit10DE_GWASandBG")
+load("/Users/Rose/Desktop/pathwayTopic")
+load("/Users/Rose/Desktop/pathwayTopicDE")
 
 fig.dir <- "Figures/Topics"
 .mkdir(fig.dir)
 QCFolder <- "Results/QC/"
+velocytoFolder <- "Data/Merged/"
 ```
 
 # Topic Modeling
@@ -34,25 +39,35 @@ QCFolder <- "Results/QC/"
 ## Data Preparation
 
 ### Loading the GWAS data
-```{r}
-if(file.exists("Results/QC/PDAC_GWAS_BG.mtx.gz")) {
-    gwas.bg <- list(mtx = "Results/QC/PDAC_GWAS_BG.mtx.gz",
-                      row = "Results/QC/PDAC_GWAS_BG.rows.gz",
-                      col = "Results/QC/PDAC_GWAS_BG.cols.gz")
+```{r, message=FALSE}
+
+if(file.exists("/Users/Rose/Desktop/Data/Merged/allCombined.mtx.gz")) {
+    full.data <- list(mtx = "Data/Merged/allCombined.mtx.gz",
+                  row = str_c(velocytoFolder,"allCombinedgenes.tsv"),
+                  col = str_c(velocytoFolder,"samples.tsv"))
+} else {
+message("WARNING: You do not have the original PDAC MTX file sets.")
+}
+
+if(file.exists("/Users/Rose/Desktop/QC/PDAC_GWAS_BG.mtx.gz")) {
+    gwas.bg <- list(mtx = "/Users/Rose/Desktop/QC/PDAC_GWAS_BG.mtx.gz",
+                      row = "/Users/Rose/Desktop/QC/PDAC_GWAS_BG.rows.gz",
+                      col = "/Users/Rose/Desktop/QC/PDAC_GWAS_BG.cols.gz")
 } else {
 message("WARNING: You should run STEP 1 of the analysis first to obtain the QC data.")
 }
+
 ```
 
-### Obtaining ratios of spliced and unspliced counts for topic modeling
-
-```{r, eval=FALSE}
+### Obtaining ratios of spliced and unspliced counts for gene topic modeling
+```{r}
 X <- Matrix::readMM(gwas.bg$mtx)
 colnames(X) <- read.table(gwas.bg$col)$V1
 rownames(X) <- read.table(gwas.bg$row)$V1
-
 s <- X[rownames(X)[str_ends(rownames(X), "_s")],]
 u <- X[rownames(X)[str_ends(rownames(X), "_u")],]
+```
+```{r, eval=FALSE}
 #Scaling unspliced counts to have same mean as spliced
 u <- u * (mean(s)/mean(u))
 u <- log(u+1)-log(s+1) #u/s ratio
@@ -60,25 +75,102 @@ X <- rbind(u,-u)
 rownames(X) <- str_replace_all(read.table(gwas.bg$row)$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
 X[X<0]  <-  0 #get rid of negative values
 X  <-  X[rowSums(X)>0,colSums(X)>0] #removing rows and columns with sum = 0
-
 X <- t(X) #Putting the ratios matrix in the cells x genes format preferred by fastTopics
 X <-  as(X, "dgCMatrix")
 ```
 
-## Performing topic modeling using fastTopics
-```{r, eval=FALSE}
-fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
-save(fit10, ascii=FALSE, file="fit10_GWAS")
+### Obtaining ratios of spliced and unspliced pathway counts for pathway topic modeling
 
-fit10DE  <-  fastTopics::diff_count_analysis(fit10,X)
-save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
+To obtain feature matrices for pathway-level topic modeling, canonical pathways from the BIOCARTA, KEGG, and REACTOME databases were used to sum gene counts per pathway. This was performed by performing a matrix multiplication between the pathway/genes matrix and the spliced and unspliced gene count matrices. Full counts were used for this as opposed to the QCed counts.
+
+```{r, eval=FALSE}
+#importing the QCed dataset including all genes
+X2 <- Matrix::readMM(full.data$mtx)
+colnames(X2) <- read.table(full.data$col)$V1
+rownames(X2) <- read.table(full.data$row)$V1
+s2 = X2[rownames(X2)[str_ends(rownames(X2), "_s")],]
+u2 = X2[rownames(X2)[str_ends(rownames(X2), "_u")],]
+
+#Assuming all cells collectively are neither in activation or repression
+u2 = u2*(mean(s2)/mean(u2))
+
+#obtaining and combining all the CP pathways
+canonicalPatways = rbind(msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:BIOCARTA"),
+                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:KEGG"),
+                         msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:REACTOME"))
+canonicalPatways = canonicalPatways[,c(3,4)] #removing unnecessary data columns
+
+#creating 2 versions: one ending with _s for spliced genes and one ending with _u for unspliced genes
+CPs=canonicalPatways
+CPu=canonicalPatways
+CPs$gene_symbol = paste(CPs$gene_symbol,"_s",sep="")
+CPu$gene_symbol = paste(CPu$gene_symbol,"_u",sep="")
+combined = rbind(CPs,CPu)
+
+#in order to get a matrix consisting of pathways and their corresponding array of genes (nPathways x 2 matrix)
+pathwayCounts = aggregate(combined$gene_symbol, by=list(Category=combined$gs_name), FUN=paste)
+geneListS=rownames(s2)
+geneListU=rownames(u2)
+
+#Creating pathway x genes (s and u separately) matrix
+i = vector()
+j = vector()
+for (x in 1:length(pathwayCounts$x)) {
+j = c(j, which(geneListS %in% unlist(pathwayCounts$x[ x ])))
+i = c(i,rep(x,each=length(which(geneListS %in% unlist(pathwayCounts$x[ x ])))))
+}
+sp_matrixS <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListS)))
+Matrix::writeMM(sp_matrixS,"sp_matrixS")
+
+i = vector()
+j = vector()
+for (x in 1:length(pathwayCounts$x)) {
+j = c(j, which(geneListU %in% unlist(pathwayCounts$x[ x ])))
+i = c(i,rep(x,each=length(which(geneListU %in% unlist(pathwayCounts$x[ x ])))))
+}
+sp_matrixU <- sparseMatrix(i=i,j=j,x=1,dims=list(length(pathwayCounts$x),length(geneListU)))
+Matrix::writeMM(sp_matrixU,"sp_matrixU")
+
+#Obtaining the pathway x cells matrices
+pathwayXs = sp_matrixS %*% s2
+pathwayXu = sp_matrixU %*% u2
+
+rownames(pathwayXs) = paste(pathwayCounts[,1],"s", sep = "_")
+rownames(pathwayXu) = paste(pathwayCounts[,1],"u", sep = "_")
+colnames(pathwayXs) = read.table(full.data$col)$V1
+rownames(pathwayXs) = read.table(full.data$row)$V1
+
+ratio1 = log(pathwayXu+1)-log(pathwayXs+1)
+rownames(ratio1) = paste(gsub('.{2}$', '', rownames(pathwayXs)),"u/s",sep = "_")
+ratio1[ratio1<0] = 0 #get rid of negative values
+ratio2 = log(pathwayXs+1)-log(pathwayXu+1)
+rownames(ratio2) = paste(gsub('.{2}$', '', rownames(pathwayXs)),"s/u",sep = "_")
+ratio2[ratio2<0] = 0 #get rid of negative values
+
+X2 = rbind(ratio1,ratio2)
+X2  <-  X2[rowSums(X2)>0,colSums(X2)>0] #removing rows and columns with sum = 0
+X2 = t(X2) #transpose
+X2 = as(X2, "dgCMatrix")
 ```
 
-### Viewing topics
+## Performing topic modeling using fastTopics
+```{r, eval=FALSE}
+#Gene level
+fit10 <- fastTopics::fit_topic_model(X, k = 10, numiter.main = 200, numiter.refine = 200)
+save(fit10, ascii=FALSE, file="fit10_GWAS")
+fit10DE  <-  fastTopics::diff_count_analysis(fit10,X)
+save(fit10DE, ascii=FALSE, file="fit10DE_GWAS")
+#Topic level
+pathwayTopic <- fastTopics::fit_topic_model(X2,k = 10,numiter.main = 200, numiter.refine = 350)
+save(pathwayTopic,ascii = FALSE, file = "pathwayTopic")
+pathwayTopicDE = fastTopics::diff_count_analysis(pathwayTopic,X2)
+save(pathwayTopicDE, ascii=FALSE, file="pathwayTopicDE")
+```
+
+### Viewing Gene Topics
 ```{r, warning=FALSE, message=FALSE}
 set.seed(1)
 topic_colors10 <- c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" )
-
 #Labeling cells by their cancer stage
 cellNames  <-  rownames(fit10[["L"]])
 caseControl  <-  data.frame(labels = matrix("Control", nrow = length(cellNames)), row.names = cellNames)
@@ -88,77 +180,90 @@ PDACIII  <-  'CRR241805|CRR034503|CRR034507'
 caseControl[grep(PDACI,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACI"
 caseControl[grep(PDACII,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACII"
 caseControl[grep(PDACIII,rownames(caseControl),value=TRUE),"labels"]  <-  "PDACIII"
-
 #view structure plot, grouped by case/control label
-fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25) #view structure plot
+fastTopics::structure_plot(fit10,colors = topic_colors10,grouping = caseControl$labels, gap = 25,topics = 1:10) #view structure plot
 ```
 
-##Heatmap
+### Viewing Pathway Topics
+```{r, warning=FALSE, message=FALSE,results = FALSE}
+set.seed(1)
+#Labeling cells by their cancer stage
+cellNamesPathways  <-  rownames(pathwayTopic[["L"]])
+caseControlPathways  <-  data.frame(labels = matrix("Control", nrow = length(cellNamesPathways)), row.names = cellNamesPathways)
+
+caseControlPathways[grep(PDACI,rownames(caseControlPathways),value=TRUE),"labels"]  <-  "PDACI"
+caseControlPathways[grep(PDACII,rownames(caseControlPathways),value=TRUE),"labels"]  <-  "PDACII"
+caseControlPathways[grep(PDACIII,rownames(caseControlPathways),value=TRUE),"labels"]  <-  "PDACIII"
+#view structure plot, grouped by case/control label
+fastTopics::structure_plot(pathwayTopic,colors = topic_colors10,grouping = caseControlPathways$labels, gap = 25,topics = 1:10) #view structure plot
+```
+## Barcharts to visualize the relationship between the Mixture Proportions and case/control labels
+
+### Gene Mixture Proportions
+```{r, warning=FALSE, message=FALSE, results = FALSE}
+set.seed(1)
+
+customBox <- function (dat, topic.label, font.size = 9)
+  ggplot(dat,aes_string(x = "x",y = "loading")) +
+    geom_boxplot(width = 0.25,size = 0.4,outlier.shape = NA) +
+    labs(x = "",y = "Mixture Proportions",title = paste("Topic",topic.label)) +
+    theme_cowplot(font.size) +
+    theme(axis.text.x = element_text(angle = 45,hjust = 1),
+          plot.title  = element_text(size = font.size,face = "plain"))
+
+loadings_plot(fit10, as.factor(caseControl$labels), ggplot_call = customBox)
+
+```
+
+### Pathway Mixture Proportions
+```{r}
+loadings_plot(pathwayTopic, as.factor(caseControlPathways$labels), ggplot_call = customBox)
+
+```
+
+## Heatmap
 ```{r, warning=FALSE, message=FALSE}
 #modified LFC to attribute an opposite sign value to s/u ratios (for heatmap colouring purposes)
 modLFC = fit10DE$beta
 modLFC[str_ends(rownames(modLFC), "_s/u"),]  <-  -fit10DE$beta[str_ends(rownames(modLFC), "_s/u"),]
-
-geneRatioLabels = str_replace_all(read.table("GWASgenes.txt")$V1, c("_s$" = "_u/s", "_u$" = "_s/u"))
-
+geneRatioLabels = row.names(modLFC)
 #ranking the genes for each topic, by relative "gene ratio" expression levels (high u/s signifies increase in expression, and s/u is opposite)
 rankedGenesRatios  <-   data.frame("k1" = sort(fit10[["F"]][,1], decreasing = T))
 rankedGenes  <-  data.frame("k1" = names(sort(fit10[["F"]][,1], decreasing = T)))
 newGenes  <-  data.frame("k1" = rankedGenes[!(rankedGenes[,1] %in% geneRatioLabels),1])
 rankedLFC  <-  data.frame("k1" = modLFC[order(fit10[["F"]][,1], decreasing = T),1])
-
 for (.x in 1:10) {
     rankedGenes[,paste0("k", .x)]  <-  names(sort(fit10[["F"]][, .x], decreasing = T))
     rankedGenesRatios[,paste0("k", .x)]  <-   sort(fit10[["F"]][, .x], decreasing = T)
     newGenes[,paste0("k", .x)]  <-  rankedGenes[!(rankedGenes[, .x] %in% geneRatioLabels), .x]
     rankedLFC[,paste0("k", .x)]  <-  modLFC[order(fit10[["F"]][, .x], decreasing = T), .x]
-
 }
-
-
-##NEEDS FIXING
-
 myColors <- c(seq(-25,-3,length=100),seq(-2.9,2.9,length=100),seq(3,25,length=100))
 myPalette <- colorRampPalette(c("red", "black", "green"))(n = 299)
-
-gplots::heatmap.2(as.matrix(rankedLFC[1:15,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=myPalette, cellnote =as.matrix(rankedGenes[1:15,]), notecex = 0.5, notecol = "white", colsep=1:15,sepcolor="white",sepwidth=c(0.05,0.05), key.title  <-  "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value",na.color = "black", breaks = myColors)
-
-
-myColors1  <-  c(seq(0,2.9,length=100),seq(3,25,length=100))
-myPalette1 <- colorRampPalette(c("black", "green"))(n = 199)
-
-gplots::heatmap.2(matrix(10,2,2),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,labCol = NA,srtCol = 0,trace = "none", density = "none", col=myPalette1, notecex = 0.5, notecol = "white", key.xlab ="u/s Ratio LFC",na.color = "black", breaks = myColors1, keysize = 16 )
-
-myColors2  <-  c(seq(0,2.9,length=100),seq(3,25,length=100))
-myPalette2 <- colorRampPalette(c("black", "red"))(n = 199)
-
-gplots::heatmap.2(matrix(10,2,2),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,labCol = NA,srtCol = 0,trace = "none", density = "none", col <- myPalette2, notecex = 0.5, notecol = "white", key.xlab ="u/s Ratio LFC",na.color = "black", breaks = myColors2, keysize = 16 )
-
-
-
-plot(rep(0,199),col=myPalette[seq(0,199,10)],pch=19,cex=2)
-
-#gplots::heatmap.2(as.matrix(rankedGenesRatios[1:10,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=gplots::bluered(100), cellnote =as.matrix(rankedGenes[1:10,]), notecex = 0.5, notecol = "black", colsep=1:10,sepcolor="white",sepwidth=c(0.05,0.05), key.title = "Relative Gene Ratio Value", key.xlab ="Relative Gene Ratio Value" )
+gplots::heatmap.2(as.matrix(rankedLFC[1:15,]),dendrogram = "none",Rowv = NA,Colv = NA,labRow = F ,srtCol = 0,trace = "none", density = "none", col=myPalette, cellnote =as.matrix(rankedGenes[1:15,]), notecex = 0.5, notecol = "white", colsep=1:15,sepcolor="white",sepwidth=c(0.001,0.001), key.title = "Adjusted LFC", key.xlab ="Adjusted LFC",na.color = "black", breaks = myColors)
 
 ```
+## Phase plot for a sample gene (MGAT5)
+```{r}
+sMg = NormalizeData(s)
+uMg = NormalizeData(u)
+sMg = sMg["MGAT5_s",]
+uMg = uMg["MGAT5_u",]
 
-##Visualizing the structure of the multinomial topic model topic proportions by projection onto a 2-d surface
-```{r, warning=FALSE, message=FALSE}
-set.seed(1)
-umap_plot(fit10)
-Y <- umap_from_topics(fit10)
-quickplot(Y[,1],Y[,2], color = caseControl$labels) + geom_point(size = 0.005)
+cols<- col2rgb(c("gold","forestgreen","dodgerblue","green","skyblue", "pink", "red", "brown", "purple","orange" ))
+
+getCellCols <-  function(mixProps){
+  
+  R <- sum(cols[1,]*mixProps)
+  G <- sum(cols[2,]*mixProps)
+  B <- sum(cols[3,]*mixProps)
+
+  rgb(red = R,green = G,blue = B, maxColorValue = 255, alpha = 70 )
+}
+
+mixPropCols = apply(fit10$L, 1, getCellCols)
+
+plot(sMg,uMg, col = scales::alpha(c( "purple","yellow","orange","red")[as.factor(caseControl$labels)], 0.5), pch = 19 )
+plot(sMg,uMg, col = mixPropCols, pch = 19 )
+
 ```
-
-
-##Barcharts to visualize the relationship between the loadings (or mixture proportions) and case/control labels
-```{r, warning=FALSE, message=FALSE}
-set.seed(1)
-loadings_plot(fit10, as.factor(caseControl$labels))
-```
-
-
-
-
-
-
