@@ -1,11 +1,11 @@
 require(torch)
+require(mmutilR)
+require(data.table)
+require(tidyverse)
 
 VelocityData <- dataset(
-    name = "single-cell data",
+    name = "single-cell velocity data",
     initialize = function(.hdr, MY.DEV = torch_device("cpu")) {
-        require(mmutilR)
-        require(data.table)
-        require(tidyverse)
         self$sc.data <- sc.data <- self$.add.ext(.hdr)
         self$DEV <- MY.DEV
         self$info <- rcpp_mmutil_info(self$sc.data$mtx)
@@ -31,26 +31,20 @@ VelocityData <- dataset(
         .ind <- rbind(.out$col, .out$row)    # column is row & vice versa
         .sz <- c(.out$max.col, .out$max.row) # size
         log.msg("Read the full sparse matrix")
-        xx <- torch_sparse_coo_tensor(.ind, .out$val, .sz, dtype = torch_float16())
+        xx <- torch_sparse_coo_tensor(.ind, .out$val, .sz,
+                                      dtype = torch_float16())
         xx <- xx$to_dense()
         log.msg("Porting to the device")
         self$x.list <- lapply(1:nrow(xx), function(r) {
             cat(r,"\r",file=stderr());flush(stderr())
-            xx[r, , drop=FALSE]$to_sparse()$to(dtype = torch_float16(), device=self$DEV)
+            xx[r, , drop=FALSE]$to_sparse()$to(dtype = torch_float16(),
+                                               device=self$DEV)
         })
         log.msg("Distributed to the device")
     },
     .getitem = function(.loc) {
         xx <- torch_cat(self$x.list[.loc], dim=1)$to_dense()$to(dtype=torch_float(), device=self$DEV)
         list(spliced = xx[, self$genes$s], unspliced = xx[, self$genes$u])
-    },
-    .slice.row = function(.data, .row){
-        .valid <- match(.row, .data$row) %>% na.omit()
-        .ret <- list(row = .data$row[.valid],
-                     col = .data$col[.valid],
-                     val = .data$val[.valid])
-        .ret$row <- match(.ret$row, .row)
-        return(.ret)
     },
     .length = function() {
         self$info$max.col
