@@ -1,0 +1,9 @@
+We call spliced and unspliced count using Kallisto-BUS tool.
+
+Example:
+
+kb count -i index.idx -g t2g.txt -x 10xv2 -o CRR241798 -c1 spliced_t2c.txt -c2 unspliced_t2c.txt --workflow lamanno --filter bustools -t 32 /projects/molonc/park_lab/data/Pancreas/raw/CRR241798_f1.fastq.gz /projects/molonc/park_lab/data/Pancreas/raw/CRR241798_r2.fastq.gz
+
+Download:
+
+rsync --progress --exclude="unfiltered" --exclude="*.bus" --exclude="*.ec" --exclude="*.idx" -arv numbers:/home/ypark/work/sam/CRR* ./
