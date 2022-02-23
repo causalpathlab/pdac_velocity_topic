@@ -3,6 +3,9 @@ title: "Quality control for PDAC single-cell transcriptomic data"
 author: "Mohammadali (Sam) Khalilitousi, Yongjin P. Park"
 date: "`r Sys.Date()`"
 font_size: 12pt
+output:
+    html_document:
+        keep_md: yes
 ---
 
 ```{r include = FALSE}
@@ -131,6 +134,9 @@ if.needed(feature.info.file,
 feature.info <- readRDS(feature.info.file)
 ```
 
+```{r echo=FALSE, results="asis"}
+cat("[feature information](" %&% feature.info.file %&% ")")
+```
 
 ## 2. Basic Q/C by row-wise and column-wise scores of the combined single-cell RNA-seq data matrix
 
@@ -258,7 +264,7 @@ ntot.cells <- nrow(score.dt)
 nqc.cells <- nrow(score.dt[mito < MITO.CUTOFF & nnz > NNZ.CUTOFF])
 ```
 
-#### Of `r num.int(ntot.cells)` cells, we retained `r num.int(nqc.cells)` (`r num.round(nqc.cells/ntot.cells*100)` %), discarding `r num.int(ntot.cells - nqc.cells)` cells (`r num.round(100 * (ntot.cells - nqc.cells) / ntot.cells)` %) by applying the Q/C steps
+#### Of `r num.int(ntot.cells)` cells, we retained `r num.int(nqc.cells)` (`r num.round(nqc.cells/ntot.cells*100)` %), discarding `r num.int(ntot.cells - nqc.cells)` cells (`r num.round(100 * (ntot.cells - nqc.cells) / ntot.cells)` %) by applying these Q/C steps
 
 ```{r}
 cell.qc.data <- fileset.list(result.dir %&% "/cell_qc")
@@ -345,9 +351,14 @@ feature.scores[str_detect(`description`, "tum[ou]+r"), cancer := "CANCER"]
 feature.scores[str_detect(`description`, "cancer"), cancer := "CANCER"]
 ```
 
-```{r echo = FALSE, results = "asis", fig.width = 8, fig.height=2}
-.plot.distrib <- function(.aes){
-    .gg.plot(feature.scores, .aes) +
+```{r include=FALSE}
+GENE_NNZ_CUTOFF <- 500
+GENE_CV_CUTOFF <- 1
+```
+
+```{r include=FALSE}
+.plot.distrib <- function(.aes, data = feature.scores){
+    .gg.plot(data, .aes) +
         geom_violin(size = 0) +
         theme(legend.position = "none") +
         theme(axis.title.x = element_blank()) +
@@ -360,7 +371,7 @@ feature.scores[str_detect(`description`, "cancer"), cancer := "CANCER"]
 .aes <- aes(x = cancer, y = log10(pmax(nnz, 1)), fill = cancer)
 p1 <-
     .plot.distrib(.aes) +
-    geom_hline(yintercept = 2, lty = 2, colour = "red") +
+    geom_hline(yintercept = log10(GENE_NNZ_CUTOFF), lty = 2, colour = "red") +
     scale_y_continuous("# non-zero elements", labels = function(x) num.int(10^(x)))
 
 .aes <- aes(x = cancer, y = log10(pmax(1e-4, `sd`)), fill = cancer)
@@ -376,8 +387,12 @@ p3 <-
 .aes <- aes(x = cancer, y = log10(pmax(1e-4, `cv`)), fill = cancer)
 p4 <-
     .plot.distrib(.aes) +
+    geom_hline(yintercept = log10(GENE_CV_CUTOFF), lty = 2, colour = "red") +
     scale_y_continuous("max {CV, 1e-4}", labels = function(x) 10^(x))
+```
 
+
+```{r echo = FALSE, results = "asis", fig.width = 8, fig.height=2}
 plt <- p1 | p2 | p3 | p4
 print(plt)
 .file <- str_c(fig.dir, "/Fig_cancer_vs_noncancer.pdf")
@@ -386,15 +401,86 @@ print(plt)
 
 
 ```{r}
-## .gene.dt <-
-##     row.score.dt %>%
-##     rename(`feature` = `name`) %>%
-##     left_join(features) %>%
-##     left_join(feature.info) %>%
-##     filter(`nnz` >= 100) %>% 
-##     as.data.table
-##     dcast(ensembl_gene_id ~ status, value.var = "sum", fun.aggregate = sum, fill = 0) %>%
-##     filter(spliced > 0, unspliced > 0) %>%
-##     as.data.table()
+us.ratio <-
+    feature.scores %>%
+    filter(`nnz` >= GENE_NNZ_CUTOFF, `cv` > GENE_CV_CUTOFF) %>% 
+    as.data.table %>% 
+    dcast(ensembl_gene_id ~ status, value.var = "sum", fun.aggregate = sum, fill = 0) %>%
+    filter(spliced > 0, unspliced > 0) %>%
+    as.data.table() %>%
+    (function(x) {
+        .dt <- feature.scores %>%
+            mutate(length = abs(transcript_end - transcript_start)) %>% 
+            select(ensembl_gene_id, cancer, percentage_gene_gc_content, length)
+        left_join(x, unique(.dt))
+    }) %>%
+    na.omit
 ```
 
+
+```{r include=FALSE}
+.aes <- aes(x = cancer, y = log10(unspliced/spliced), fill = cancer)
+
+p1 <-
+    .plot.distrib(.aes, data = us.ratio) +
+    scale_y_continuous("unspliced/spliced", labels = function(x) 10^x)
+
+.aes <- aes(x = cancer, y = percentage_gene_gc_content, fill = cancer)
+
+p2 <-
+    .plot.distrib(.aes, data = us.ratio) +
+    scale_y_continuous("GC content (%)", labels = round)
+
+
+.aes <- aes(x = cancer, y = log10(`length`), fill = cancer)
+
+p3 <-
+    .plot.distrib(.aes, data = us.ratio) +
+    scale_y_continuous("transcript length", labels = function(x) round(10^x))
+
+plt <- p1 | p2 | p3
+```
+
+
+```{r echo = FALSE, results="asis", fig.width=6, fig.height=2}
+suppressWarnings({ print(plt) })
+.file <- str_c(fig.dir, "/Fig_cancer_vs_noncancer_ratio.pdf")
+.gg.save(.file, plot = plt, width = 6, height = 2)
+```
+
+```{r include=FALSE}
+ngenes.tot <- length(unique(feature.scores$ensembl_gene_id))
+ngenes.qc <- nrow(us.ratio)
+```
+
+#### Select high-quality genes that are expressed in at least `r GENE_NNZ_CUTOFF` cells with the coefficient of variation across cells  $>$ `r GENE_CV_CUTOFF`
+
+
+```{r}
+qc.data <- fileset.list(result.dir %&% "/final_qc")
+qc.features <- features[ensembl_gene_id %in% us.ratio$ensembl_gene_id, .(feature)] %>%
+    unique %>% 
+    unlist
+
+if.needed(qc.data,
+{
+    rcpp_mmutil_copy_selected_rows(cell.qc.data$mtx,
+                                   cell.qc.data$row,
+                                   cell.qc.data$col,
+                                   qc.features,
+                                   output = result.dir %&% "/final_qc");
+})
+```
+
+```{r include = FALSE}
+.info <- rcpp_mmutil_info(qc.data$mtx)
+```
+
+MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
+
+```{r echo=FALSE, results="asis"}
+cat(paste0(sapply(1:length(qc.data),
+                  function(j) {
+                      "* [" %&% names(qc.data)[j] %&% "](" %&% qc.data[j] %&% ")"
+                  }), collapse="\n"))
+```
