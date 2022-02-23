@@ -10,105 +10,164 @@ source("Util-rmd.R")
 data.table::setDTthreads(15)
 library(patchwork)
 library(mmutilR)
-
 fig.dir <- "Figures/QC"
 .mkdir(fig.dir)
-velocytoFolder <- "Data/Merged/"
 ```
 
-# Quality Control
-
-## Data Sources
+# Data preprocessing
 
 * FASTQ files for pancreatic ductal adenocarcinoma (PDAC) were obtained from the GSA: `https://ngdc.cncb.ac.cn/gsa/browse/CRA001160`
 
+* Two papers: [Chen _et al._ (2021)](https://pubmed.ncbi.nlm.nih.gov/33819739/) and [Peng _et al._ (2019)](https://pubmed.ncbi.nlm.nih.gov/31273297/)
+
 * FASTQ files were transformed into spliced and unspliced count matrices using kb-python: `https://www.kallistobus.tools/`
 
-* The ENSEMBL Gene IDs were converted to Gene Symbols using biotools: `https://www.biotools.fr/human/ensembl_symbol_converter`
 
-* Pancreatic Cancer associated genes: `https://maayanlab.cloud/Harmonizome/gene_set/pancreatic+cancer/DISEASES+Text-mining+Gene-Disease+Assocation+Evidence+Scores`
 
-## Sample Annotation
+```{r results = "asis"}
+result.dir <- "Results/QC"
+.mkdir(result.dir)
+sample.info.file <- result.dir %&% "/Tab_Samples.csv"
 
-Samples that contained different number of cell counts in their spliced and unsplcied gene count matrices were not selected for further analysis.
-
-* Normal Samples: CRR034530, CRR034529, CRR034528, CRR034527,
-  CRR034526, CRR034525, CRR034524, CRR034523, CRR034522, CRR034521,
-  CRR034520
-
-* Cancer Samples:
-
-	* PDACI: CRR241799 (T3), CRR034500 (T5), CRR034512 (T17),
-      CRR034513 (T18), CRR034519 (T24), CRR034517 (T22), CRR034516
-      (T21), CRR241802 (T19), CRR034505 (T10)
-
-	* PDACII: CRR241798 (T2), CRR034499 (T4), CRR034501 (T6),
-      CRR034504 (T9), CRR241803 (T23), CRR241804 (T20), CRR241800
-      (T7), CRR034511 (T16), CRR034506 (T11), CRR034510 (T15),
-      CRR034509 (T14), CRR241801 (T13)
-
-	* PDACIII: CRR241805 (T1), CRR034503 (T8), CRR034507 (T12)
-
-* Samples we though had unknown stage: CRR034519 (T24), CRR241803
-  (T23), CRR034517 (T22), CRR034516 (T21), CRR241804 (T20), CRR241800
-  (T7), CRR241802 (T19), CRR034505 (T10), CRR034511 (T16), CRR034506
-  (T11), CRR034510 (T15), CRR034509 (T14), CRR241801 (T13)
-
-* Samples excluded: CRR034501 (T6), CRR034507 (T12), CRR034509 (T14),
-  CRR034510 (T15), CRR034517 (T22)
-
-## Data preparation
-
-```{r echo=FALSE}
-.read.vec <- function(.file, .folder = velocytoFolder){
-    fread(str_c(.folder, .file), header = FALSE) %>%
-        unlist(use.names = FALSE)
-}
-barcodes <- .read.vec("samples.tsv")
-features <- .read.vec("allCombinedgenes.tsv")
-GWASgenes <- .read.vec("GWASgenes.txt") %>% intersect(features)
-
-## We may not need to load entire MTX
-## X <- Matrix::readMM(paste(velocytoFolder,"allCombined.mtx", sep=""))
-## colnames(X) <- barcodes[,1]
-## rownames(X) <- features[,1]
+if.needed(sample.info.file,
+{
+    .samples <-
+        readxl::read_xlsx("Data/CRA001160.xlsx", 1) %>%
+        select(-`Accession`) %>% 
+        left_join(readxl::read_xlsx("Data/CRA001160.xlsx", 3)) %>%
+        select(`ID`, `Accession`, `Sample name`, `Public description`, `Sex`)
+    fwrite(.samples, sample.info.file)
+})
 ```
 
-### Compute row-wise and column-wise scores of the combined single-cell data matrix
+
+
+## 1. Merge all the files into one file set
+
+```{r}
+result.dir <- "Results/QC"
+.mkdir(result.dir)
+merged.hdr <- result.dir %&% "/Merged"
+raw.data.dirs <- list.files("Data/processed", pattern = "CRR[0-9]+", full.names = TRUE)
+```
+
+We merged `r length(raw.data.dirs)` file sets into one file set, distinguishing the spliced and unspliced features.
+
+```{r}
+merged <- fileset.list(merged.hdr)
+
+if(!all(file.exists(unlist(merged)))){
+
+    .hdrs <- raw.data.dirs %&% "/counts_filtered"
+
+    merged <- rcpp_mmutil_merge_file_sets(
+        r_headers = .hdrs,
+        r_batches = sapply(raw.data.dirs, basename),
+        r_mtx = .hdrs %&% ".mtx.gz",
+        r_row = .hdrs %&% ".rows.gz",
+        r_col = .hdrs %&% ".cols.gz",
+        output = merged.hdr)
+}
+```
+
+Create a mapping between ENSEMBL gene ID and HGNC symbols.
+
+```{r}
+features <- fread(merged$row, col.names = "feature", header=FALSE)
+
+parse <- function(s){
+    transpose(lapply(strsplit(s, "[_.]"), function(x) c(x[1], x[length(x)])))
+}
+
+features[, c("ensembl_gene_id", "status") := parse(`feature`)]
+
+feature.info.file <- result.dir %&% "/feature_info.RDS"
+
+if.needed(feature.info.file,
+{
+
+    ensembl <- biomaRt::useMart(biomart='ENSEMBL_MART_ENSEMBL',
+                                host='uswest.ensembl.org',
+                                path='/biomart/martservice',
+                                dataset='hsapiens_gene_ensembl')
+
+    ensembl.hs <- biomaRt::useDataset('hsapiens_gene_ensembl', mart=ensembl)
+
+    .attr <- c('ensembl_gene_id',
+               'hgnc_symbol',
+               'chromosome_name',
+               'transcription_start_site',
+               'transcript_start',
+               'transcript_end',
+               'description',
+               'percentage_gene_gc_content')
+
+    .temp <- biomaRt::getBM(attributes=.attr,
+                            filters=c('ensembl_gene_id'),
+                            values=unique(features$ensembl_gene_id),
+                            mart=ensembl.hs,
+                            useCache = FALSE)
+
+    .temp <- as.data.table(.temp)
+
+    feature.info <-
+        rbind(.temp[transcript_start < transcript_end,
+                    .(transcript_start = min(transcript_start),
+                      transcript_end = max(transcript_end),
+                      percentage_gene_gc_content = mean(percentage_gene_gc_content),
+                      chromosome_name = first(chromosome_name),
+                      description = first(description)),
+                    by = .(ensembl_gene_id, hgnc_symbol)],
+              .temp[transcript_start > transcript_end,
+                    .(transcript_start = max(transcript_start),
+                      transcript_end = min(transcript_end),
+                      percentage_gene_gc_content = mean(percentage_gene_gc_content),
+                      chromosome_name = first(chromosome_name),
+                      description = first(description)),
+                    by = .(ensembl_gene_id, hgnc_symbol)])
+
+    saveRDS(feature.info, file=feature.info.file)
+})
+feature.info <- readRDS(feature.info.file)
+```
+
+
+## 2. Basic Q/C by row-wise and column-wise scores of the combined single-cell RNA-seq data matrix
 
 
 ```{r}
-.mkdir("Results/QC")
-if(file.exists("Results/QC/MT.mtx.gz")) {
-    .mt.only <- list(mtx = "Results/QC/MT.mtx.gz",
-                     row = "Results/QC/MT.rows.gz",
-                     col = "Results/QC/MT.cols.gz")
-} else {
-    .mt.genes <- features[str_starts(features, "MT-")]
-    .mt.only <-
-        rcpp_mmutil_copy_selected_rows("Data/Merged/allCombined.mtx.gz",
-                                       str_c(velocytoFolder,"allCombinedgenes.tsv"),
-                                       str_c(velocytoFolder,"samples.tsv"),
-                                       .mt.genes,
-                                       "Results/QC/MT")
-}
+.mt.genes <-
+    left_join(features, feature.info) %>%
+    filter(chromosome_name == "MT") %>%
+    select(feature) %>%
+    unlist
+
+.mt.only <- fileset.list(result.dir %&% "/MT")
+
+if.needed(.mt.only,
+{
+    rcpp_mmutil_copy_selected_rows(merged$mtx,
+                                   merged$row,
+                                   merged$col,
+                                   .mt.genes,
+                                   result.dir %&% "/MT");
+})
 ```
+
+
 
 ```{r}
 .mkdir("Table/QC/")
 .file <- "Table/QC/cell_scores.csv.gz"
 .file.2 <- "Table/QC/feature_scores.csv.gz"
 
-full.data <- list(mtx = "Data/Merged/allCombined.mtx.gz",
-                  row = str_c(velocytoFolder,"allCombinedgenes.tsv"),
-                  col = str_c(velocytoFolder,"samples.tsv"))
-
-if(!all(file.exists(c(.file, .file.2)))) {
+if.needed(c(.file, .file.2),
+{
 
     all.scores <-
-        rcpp_mmutil_compute_scores(full.data$mtx,
-                                   full.data$row,
-                                   full.data$col)
+        rcpp_mmutil_compute_scores(merged$mtx,
+                                   merged$row,
+                                   merged$col)
 
     mt.scores <-
         rcpp_mmutil_compute_scores(.mt.only$mtx,
@@ -127,19 +186,11 @@ if(!all(file.exists(c(.file, .file.2)))) {
 
     row.score.dt <- setDT(all.scores$row)
     fwrite(row.score.dt, .file.2)
-
-} else {
-    score.dt <- fread(.file)
-    row.score.dt <- fread(.file.2)
-}
+})
+score.dt <- fread(.file)
+row.score.dt <- fread(.file.2)
 ```
 
-```{r}
-MITO.CUTOFF <- 50
-NNZ.CUTOFF <- 300
-```
-
-#### Select high-quality cells that contain at least $>$ `r NNZ.CUTOFF` non-zero genes expressed with the mitochondrial gene activity $<$ `r MITO.CUTOFF` %
 
 ```{r}
 .hist.nnz <- score.dt[, .(.N), by = .(0.1 * ceiling(10 * log10(nnz)))]
@@ -153,6 +204,14 @@ names(.hist.mito) <- c("mito", "count")
 
 .hist.joint <- .dt[, .(.N), by = .(nnz.log10.grid, mito.grid)]
 ```
+
+```{r include = FALSE}
+MITO.CUTOFF <- 50
+NNZ.CUTOFF <- 300
+```
+
+#### Select high-quality cells that contain at least $>$ `r NNZ.CUTOFF` non-zero genes expressed with the mitochondrial gene activity $<$ `r MITO.CUTOFF` %
+
 
 ```{r echo = FALSE, results = "asis", fig.width = 5, fig.height=4}
 .lab <- function(x) num.sci(10^(x))
@@ -201,230 +260,141 @@ nqc.cells <- nrow(score.dt[mito < MITO.CUTOFF & nnz > NNZ.CUTOFF])
 
 #### Of `r num.int(ntot.cells)` cells, we retained `r num.int(nqc.cells)` (`r num.round(nqc.cells/ntot.cells*100)` %), discarding `r num.int(ntot.cells - nqc.cells)` cells (`r num.round(100 * (ntot.cells - nqc.cells) / ntot.cells)` %) by applying the Q/C steps
 
-### We focused on the known PDAC-associated genes implicated by the previous genome-wide association studies
+```{r}
+cell.qc.data <- fileset.list(result.dir %&% "/cell_qc")
+qc.cells <- score.dt[mito < MITO.CUTOFF & nnz > NNZ.CUTOFF, .(name)] %>%
+    unlist
 
-```{r echo = FALSE, results = "asis", fig.width = 6, fig.height=2}
-.dt <-
-    copy(row.score.dt) %>%
-    mutate(gwas = if_else(`name` %in% GWASgenes, "GWAS", "non-GWAS")) %>%
+if.needed(cell.qc.data,
+{
+    rcpp_mmutil_copy_selected_columns(merged$mtx,
+                                      merged$row,
+                                      merged$col,
+                                      qc.cells,
+                                      output = result.dir %&% "/cell_qc");
+})
+```
+
+### Cancer-related genes are highly expressed in the scRNA-seq data
+
+```{r}
+gwas.data.file <- "gwas_catalog_tidy.tsv.gz"
+```
+
+```{r download_full_gwas_catalog, include=FALSE}
+gwas.file <- result.dir %&% "/gwas_catalog_v1.0-associations_e105_r2022-02-02.tsv.gz"
+if.needed(gwas.file,
+{
+    url <- "https://www.ebi.ac.uk/gwas/api/search/downloads/full"
+    .file <- str_remove(gwas.file, ".gz$")
+    download.file(url, destfile = .file)
+    R.utils::gzip(.file)
+    unlink(.file)
+})
+if.needed(gwas.data.file,
+{
+    .dt <-
+        fread(gwas.file, sep="\t", quote="") %>%
+        select(`MAPPED_GENE`, `DISEASE/TRAIT`, `PVALUE_MLOG`)
+    ## remove redundant associations
+    .dt <- .dt[order(.dt$PVALUE_MLOG, decreasing = TRUE),
+               head(.SD, 1),
+               by = .(`MAPPED_GENE`, `DISEASE/TRAIT`)]
+    ## remove traits with too few associations
+    .count <- .dt[, .(.N), by = .(`DISEASE/TRAIT`)]
+    .dt <- left_join(.count[`N` >= 100, ], .dt)[nchar(`MAPPED_GENE`)> 0,]
+    ## simply split gene lists and unlist
+    .dt <- .dt[,
+               .(gene_symbol = unlist(strsplit(`MAPPED_GENE`, split="[ ,.-]+"))),
+               by = .(`DISEASE/TRAIT`, PVALUE_MLOG)]
+    .dt[, p.value := 10^(-PVALUE_MLOG)]
+    fwrite(.dt, file=gwas.data.file)
+})
+gwas.data <- fread(gwas.data.file)
+```
+
+```{r}
+.file <- "Table/QC/feature_scores_qc.csv.gz"
+if.needed(.file,
+{
+    all.scores <-
+        rcpp_mmutil_compute_scores(cell.qc.data$mtx,
+                                   cell.qc.data$row,
+                                   cell.qc.data$col)
+    .dt <- setDT(all.scores$row)
+    fwrite(.dt, .file)
+})
+feature.scores <- fread(.file) %>%
+    rename(`feature` = `name`) %>%
+    left_join(features) %>%
+    left_join(feature.info) %>%
     as.data.table
+```
 
+
+```{r}
+cancer.genes <-
+    gwas.data[str_detect(`DISEASE/TRAIT`, "[Cc]ancer"), .(gene_symbol)] %>%
+    unique %>%
+    unlist
+
+feature.scores[, cancer := "non-CANCER"]
+feature.scores[`hgnc_symbol` %in% cancer.genes, cancer := "CANCER"]
+feature.scores[str_detect(`description`, "oncogene"), cancer := "CANCER"]               
+feature.scores[str_detect(`description`, "tum[ou]+r"), cancer := "CANCER"]
+feature.scores[str_detect(`description`, "cancer"), cancer := "CANCER"]
+```
+
+```{r echo = FALSE, results = "asis", fig.width = 8, fig.height=2}
 .plot.distrib <- function(.aes){
-    .gg.plot(.dt, .aes) +
+    .gg.plot(feature.scores, .aes) +
         geom_violin(size = 0) +
         theme(legend.position = "none") +
         theme(axis.title.x = element_blank()) +
         ggpubr::stat_compare_means(size = 2) +
         scale_fill_brewer(palette = "Paired") +
         geom_boxplot(outlier.size = 0, outlier.stroke = 0,
-                     width = .05, size = .2, fill = "white")
-    
+                     width = .02, size = .2, fill = "white")
 }
 
-.aes <- aes(x = gwas, y = log10(pmax(nnz, 1)), fill = gwas)
+.aes <- aes(x = cancer, y = log10(pmax(nnz, 1)), fill = cancer)
 p1 <-
     .plot.distrib(.aes) +
+    geom_hline(yintercept = 2, lty = 2, colour = "red") +
     scale_y_continuous("# non-zero elements", labels = function(x) num.int(10^(x)))
 
-.aes <- aes(x = gwas, y = log10(pmax(1e-4, `sd`)), fill = gwas)
+.aes <- aes(x = cancer, y = log10(pmax(1e-4, `sd`)), fill = cancer)
 p2 <-
     .plot.distrib(.aes) +
     scale_y_continuous("max {StdDev, 1e-4}", labels = function(x) 10^(x))
 
-.aes <- aes(x = gwas, y = log10(pmax(1e-4, `mean`)), fill = gwas)
+.aes <- aes(x = cancer, y = log10(pmax(1e-4, `mean`)), fill = cancer)
 p3 <-
     .plot.distrib(.aes) +
     scale_y_continuous("max {Mean, 1e-4}", labels = function(x) 10^(x))
 
-plt <- p1 | p2 | p3
+.aes <- aes(x = cancer, y = log10(pmax(1e-4, `cv`)), fill = cancer)
+p4 <-
+    .plot.distrib(.aes) +
+    scale_y_continuous("max {CV, 1e-4}", labels = function(x) 10^(x))
+
+plt <- p1 | p2 | p3 | p4
 print(plt)
-.file <- str_c(fig.dir, "/Fig_gwas_genes_vs_nongwas.pdf")
-.gg.save(.file, plot = plt, width = 6, height = 2)
-```
-
-```{r}
-unique.gwas.genes <- str_remove(GWASgenes, "_[us]$") %>% unique
-```
-
-We selected `r num.int(length(unique.gwas.genes))` PDAC GWAS genes from literature search, considering the spliced and unspliced counts separately, and included `r num.int(length(GWASgenes))` features. To our surprise, these genes tend to capture a significantly higher level of variation across cells than the non-GWAS genes.
-
-
-```{r fig.width=5, fig.height=5, results = "asis"}
-.dt <-
-    row.score.dt[, c("gene","status") := tstrsplit(`name`, split="_")]
-
-.dt.sum <- .dt %>% 
-    mutate(gwas = if_else(`name` %in% GWASgenes, "GWAS", "non-GWAS")) %>%
-    dcast(gene + gwas ~ status,
-          value.var = "sum",
-          fun.aggregate = sum) %>%
-    filter(`s` + `u` > 0)
-
-p1 <-
-    .gg.plot(.dt.sum, aes(y = log(1 + `u`), x = log(1 + `s`))) +
-    ylab("log(1 + unspliced)") + xlab("log(1 + spliced)") +
-    facet_grid(.~ gwas) +
-    geom_point(stroke = 0, size = .5) +
-    geom_abline(slope = 1, colour = "red", size = .5, lty = 2)
-
-p2 <-
-    .gg.plot(.dt.sum, aes(y = log(1 + `u`), x = log(1 + `s`))) +
-    ylab("log(1 + unspliced)") + xlab("log(1 + spliced)") +
-    theme(panel.background = element_blank()) +
-    theme(legend.position = c(0,1)) +
-    theme(legend.justification = c(0,1)) +
-    facet_grid(.~ gwas) +
-    stat_bin_hex(aes(colour = ..count..), bins = 25) +
-    scale_colour_distiller(direction = 1, trans = "log10", guide="none") +
-    scale_fill_distiller(direction = 1, trans = "log10") +
-    geom_abline(slope = 1, colour = "red", size = .5, lty = 2)
-
-plt <- p1/p2
-print(plt)
-.file <- str_c(fig.dir, "/Fig_u_vs_s_gwas_genes_vs_nongwas.pdf")
-.gg.save(.file, plot = plt, width = 5, height = 5)
-```
-
-
-#### Create a fileset of gene expression data only including the GWAS genes
-
-```{r}
-.mkdir("Results/QC")
-if(file.exists("Results/QC/PDAC_GWAS.mtx.gz")) {
-    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS.mtx.gz",
-                      row = "Results/QC/PDAC_GWAS.rows.gz",
-                      col = "Results/QC/PDAC_GWAS.cols.gz")
-
-} else {
-    gwas.data <-
-        rcpp_mmutil_copy_selected_rows(full.data$mtx,
-                                       full.data$row,
-                                       full.data$col,
-                                       GWASgenes,
-                                       "Results/QC/PDAC_GWAS")
-}
-```
-
-```{r}
-.info <- rcpp_mmutil_info("Results/QC/PDAC_GWAS.mtx.gz")
-```
-
-MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
-
-[MTX](Results/QC/PDAC_GWAS.mtx.gz), [ROW](Results/QC/PDAC_GWAS.rows.gz), [COL](Results/QC/PDAC_GWAS.cols.gz)
-
-
-#### Create a fileset of gene expression data, including the GWAS genes and non-GWAS genes with high variability
-
-
-```{r}
-.hist.nnz <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`nnz`)))]
-names(.hist.nnz) <- c("nnz.log10", "count")
-.hist.mean <- row.score.dt[mean > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`mean`)))]
-names(.hist.mean) <- c("mean.log10", "count")
-.hist.sd <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`sd`)))]
-names(.hist.sd) <- c("sd.log10", "count")
-.hist.cv <- row.score.dt[nnz > 0, .(.N), by = .(0.1 * ceiling(10 * log10(`cv`)))]
-names(.hist.cv) <- c("cv.log10", "count")
-
-.dt <- row.score.dt %>%
-    filter(nnz > 0) %>% 
-    mutate(mean.log10.grid = 0.1 * ceiling(10 * log10(mean)),
-           sd.log10.grid = 0.1 * ceiling(10 * log10(`sd`))) %>%
-    na.omit %>%
-    as.data.table
-           
-.hist.joint <- .dt[, .(.N), by = .(mean.log10.grid, sd.log10.grid)]
-```
-
-```{r}
-SD.CUTOFF <- .1
-MEAN.CUTOFF <- 1e-2
-```
-
-```{r echo = FALSE, results = "asis", fig.width = 5, fig.height=4}
-.lab <- function(x) num.sci(10^(x))
-
-p1 <-
-    .gg.plot(.hist.mean, aes(x = `mean.log10`, y = `count`)) +
-    geom_bar(stat="identity", size = .25) +
-    geom_vline(xintercept = log10(MEAN.CUTOFF), colour = "red", lty = 2, size = .5) +
-    scale_x_continuous("average across cells", labels = .lab) +
-    scale_y_continuous(labels = num.int)
-
-p2 <-
-    .gg.plot(.hist.sd, aes(y = `sd.log10`, x = -`count`)) +
-    geom_segment(aes(yend = `sd.log10`, xend = 0), size = 1, colour = "gray30") +
-    theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1)) +
-    geom_hline(yintercept = log10(SD.CUTOFF), colour = "red", lty = 2, size = .5) +
-    scale_y_continuous("standard deviation across cells", labels = .lab) +
-    scale_x_continuous("count", labels = function(x) num.sci(-x))
-
-p3 <-
-    .gg.plot(.hist.joint, aes(x = mean.log10.grid, y = sd.log10.grid, fill = log10(`N`))) +
-    theme(panel.background = element_blank()) +
-    scale_x_continuous("average across cells", labels = .lab) +
-    scale_y_continuous("standard deviation across cells", labels = .lab) +
-    geom_tile() +
-    geom_vline(xintercept = log10(MEAN.CUTOFF), colour = "red", lty = 2, size = .5) +
-    geom_hline(yintercept = log10(SD.CUTOFF), colour = "red", lty = 2, size = .5) +
-    scale_fill_distiller("count", direction = 1, labels = function(x) num.int(10^x)) +
-    theme(legend.position = c(0,1), legend.justification = c(0,1))
-
-p0 <- ggplot() + theme_void()
-
-pleft <- (p0/p2) + plot_layout(heights=c(1,3)) 
-pright <- (p1/p3) + plot_layout(heights=c(1,3)) 
-plt <- (pleft | pright) + plot_layout(widths=c(1,3))
-
-print(plt)
-
-.file <- str_c(fig.dir, "/Fig_gene_qc_cutoff.pdf")
-.gg.save(.file, plot = plt, width = 5, height = 4)
+.file <- str_c(fig.dir, "/Fig_cancer_vs_noncancer.pdf")
+.gg.save(.file, plot = plt, width = 8, height = 2)
 ```
 
 
 ```{r}
-.genes <-
-    row.score.dt %>%
-    filter(!(`name` %in% GWASgenes)) %>%
-    filter(`sd` > SD.CUTOFF) %>% 
-    filter(`mean` > MEAN.CUTOFF) %>%
-    mutate(gene = str_remove(`name`, "_[us]$")) %>%
-    as.data.table
-
-non.gwas.genes <- 
-    .genes[order(.genes$nnz), head(.SD,1), by = .(gene)] %>%
-    head(length(GWASgenes)/2) %>%
-    select(gene) %>%
-    unlist %>%
-    (function(x) c(x %&% "_s", x %&% "_u"))
+## .gene.dt <-
+##     row.score.dt %>%
+##     rename(`feature` = `name`) %>%
+##     left_join(features) %>%
+##     left_join(feature.info) %>%
+##     filter(`nnz` >= 100) %>% 
+##     as.data.table
+##     dcast(ensembl_gene_id ~ status, value.var = "sum", fun.aggregate = sum, fill = 0) %>%
+##     filter(spliced > 0, unspliced > 0) %>%
+##     as.data.table()
 ```
-
-Create another fileset combining GWAS and other background genes.
-
-```{r}
-.mkdir("Results/QC")
-if(file.exists("Results/QC/PDAC_GWAS_BG.mtx.gz")) {
-    gwas.data <- list(mtx = "Results/QC/PDAC_GWAS_BG.mtx.gz",
-                      row = "Results/QC/PDAC_GWAS_BG.rows.gz",
-                      col = "Results/QC/PDAC_GWAS_BG.cols.gz")
-
-} else {
-    gwas.data <-
-        rcpp_mmutil_copy_selected_rows(full.data$mtx,
-                                       full.data$row,
-                                       full.data$col,
-                                       c(GWASgenes, non.gwas.genes),
-                                       "Results/QC/PDAC_GWAS_BG")
-}
-```
-
-```{r}
-.info <- rcpp_mmutil_info("Results/QC/PDAC_GWAS_BG.mtx.gz")
-```
-
-MTX data (`r num.int(.info$max.row)` features; `r num.int(.info$max.col)` cells; `r num.int(.info$max.elem)` non-zero elements; `r num.round(100 * .info$max.elem / .info$max.col / .info$max.row)`%):
-
-[MTX](Results/QC/PDAC_GWAS_BG.mtx.gz), [ROW](Results/QC/PDAC_GWAS_BG.rows.gz), [COL](Results/QC/PDAC_GWAS_BG.cols.gz)
 

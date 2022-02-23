@@ -35,6 +35,11 @@ log.msg <- function(...) {
     cat(sprintf('[%s] ', ss), sprintf(...), '\n', file = stderr(), sep = '')
 }
 
+if.needed <- function(.file, .code) {
+    if(!all(file.exists(unlist(.file)))) { .code }
+    stopifnot(all(file.exists(unlist(.file))))
+}
+
 .gg.save <- function(filename, cat.link=TRUE, ...) {
     if(file.exists(filename)) {
         log.msg('File already exits: %s', filename)
